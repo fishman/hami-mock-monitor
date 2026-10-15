@@ -46,8 +46,8 @@ func lockedNode(lock string) *corev1.Node {
 }
 
 // setup returns a completer whose pod cache is a snapshot of pods: it does
-// not see the completer's own patches, like an informer that lags behind.
-func setup(t *testing.T, n *corev1.Node, pods ...*corev1.Pod) (*Completer, *fake.Clientset) {
+// not see the completer's own patches until syncCache, like a lagging informer.
+func setup(t *testing.T, n *corev1.Node, pods ...*corev1.Pod) (*Completer, *fake.Clientset, cache.Indexer) {
 	t.Helper()
 	objects := []runtime.Object{n}
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
@@ -58,7 +58,20 @@ func setup(t *testing.T, n *corev1.Node, pods ...*corev1.Pod) (*Completer, *fake
 		}
 	}
 	client := fake.NewClientset(objects...)
-	return New(client, listerscorev1.NewPodLister(indexer), node), client
+	return New(client, listerscorev1.NewPodLister(indexer), node), client, indexer
+}
+
+func syncCache(t *testing.T, client *fake.Clientset, indexer cache.Indexer) {
+	t.Helper()
+	pods, err := client.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range pods.Items {
+		if err := indexer.Update(&pods.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func bindPhase(t *testing.T, client *fake.Clientset, name string) string {
@@ -90,41 +103,81 @@ func patches(client *fake.Clientset) []k8stesting.PatchAction {
 	return out
 }
 
-func TestCompletesOnlyTheLockedPendingPod(t *testing.T) {
+func TestCompletesOpenBindsAndReleasesTheirLock(t *testing.T) {
 	ctx := context.Background()
-	c, client := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,locked"),
+	c, client, indexer := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,locked"),
 		pendingPod("locked", hami.BindPhaseAllocating),
-		pendingPod("waiting", hami.BindPhaseAllocating),
+		pendingPod("unlocked", hami.BindPhaseAllocating),
 	)
 	if err := c.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := bindPhase(t, client, "locked"); got != hami.BindPhaseSuccess {
-		t.Errorf("locked pod: bind phase %q, want success", got)
-	}
-	if got := bindPhase(t, client, "waiting"); got != hami.BindPhaseAllocating {
-		t.Errorf("pod not named by the lock: bind phase %q, want allocating", got)
+	for _, name := range []string{"locked", "unlocked"} {
+		if got := bindPhase(t, client, name); got != hami.BindPhaseSuccess {
+			t.Errorf("%s: bind phase %q, want success", name, got)
+		}
 	}
 	if v, held := lock(t, client); held {
 		t.Errorf("node lock %q not released", v)
 	}
 
-	// Again, with the cache still showing allocating: nothing left to do.
+	// Again before the cache caught up, then after: same end state, and
+	// nothing left to patch once the cache shows it.
+	if err := c.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	syncCache(t, client, indexer)
 	client.ClearActions()
 	if err := c.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if p := patches(client); len(p) != 0 {
-		t.Errorf("second reconcile patched %d objects", len(p))
+		t.Errorf("reconcile after completion patched %d objects", len(p))
 	}
 	if got := bindPhase(t, client, "locked"); got != hami.BindPhaseSuccess {
-		t.Errorf("second reconcile changed the bind phase to %q", got)
+		t.Errorf("repeated reconciles changed the bind phase to %q", got)
+	}
+}
+
+func TestCompletesPodRunningBeforeItWasSeen(t *testing.T) {
+	running := pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,p"), running)
+	if err := c.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := bindPhase(t, client, "p"); got != hami.BindPhaseSuccess {
+		t.Errorf("bind phase %q, want success", got)
+	}
+	if v, held := lock(t, client); held {
+		t.Errorf("node lock %q not released", v)
+	}
+}
+
+func TestKeepsLockNotNamingTheCompletedPod(t *testing.T) {
+	for _, l := range []string{
+		"2026-10-15T10:00:00Z,team-a,other", // another pod
+		"2026-10-15T10:00:00Z,team-b,p",     // same name, another namespace
+		"2026-10-15T10:00:00Z",              // legacy form, names no pod
+	} {
+		t.Run(l, func(t *testing.T) {
+			running := pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
+			c, client, _ := setup(t, lockedNode(l), running)
+			if err := c.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := bindPhase(t, client, "p"); got != hami.BindPhaseSuccess {
+				t.Errorf("bind phase %q, want success", got)
+			}
+			if v, held := lock(t, client); !held || v != l {
+				t.Errorf("lock = %q (held %v), want %q kept", v, held, l)
+			}
+		})
 	}
 }
 
 func TestReleasesLockOfAlreadyCompletedPod(t *testing.T) {
 	// A previous run patched the pod but died before releasing the lock.
-	c, client := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,done"), pendingPod("done", hami.BindPhaseSuccess))
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,done"), pendingPod("done", hami.BindPhaseSuccess))
 	if err := c.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -136,24 +189,15 @@ func TestReleasesLockOfAlreadyCompletedPod(t *testing.T) {
 	}
 }
 
-func TestLeavesOtherPodsAndLocksAlone(t *testing.T) {
-	running := func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning }
-	elsewhere := func(p *corev1.Pod) { p.Spec.NodeName = "other-node" }
-	for _, tc := range []struct {
-		name string
-		lock string
-		pod  *corev1.Pod
-	}{
-		{"running pod", "2026-10-15T10:00:00Z,team-a,p", pendingPod("p", hami.BindPhaseAllocating, running)},
-		{"pod bound elsewhere", "2026-10-15T10:00:00Z,team-a,p", pendingPod("p", hami.BindPhaseAllocating, elsewhere)},
-		{"failed bind", "2026-10-15T10:00:00Z,team-a,p", pendingPod("p", "failed")},
-		{"lock names another pod", "2026-10-15T10:00:00Z,team-a,q", pendingPod("p", hami.BindPhaseAllocating)},
-		{"lock in another namespace", "2026-10-15T10:00:00Z,team-b,p", pendingPod("p", hami.BindPhaseAllocating)},
-		{"legacy lock without owner", "2026-10-15T10:00:00Z", pendingPod("p", hami.BindPhaseAllocating)},
-		{"no lock", "", pendingPod("p", hami.BindPhaseAllocating)},
+func TestLeavesOtherPodsAlone(t *testing.T) {
+	for name, pod := range map[string]*corev1.Pod{
+		"pod bound elsewhere": pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Spec.NodeName = "other-node" }),
+		"pod not bound yet":   pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Spec.NodeName = "" }),
+		"finished pod":        pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Status.Phase = corev1.PodSucceeded }),
+		"failed bind":         pendingPod("p", "failed"),
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c, client := setup(t, lockedNode(tc.lock), tc.pod)
+		t.Run(name, func(t *testing.T) {
+			c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,p"), pod)
 			if err := c.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +210,7 @@ func TestLeavesOtherPodsAndLocksAlone(t *testing.T) {
 
 func TestNoCandidateNoAPICalls(t *testing.T) {
 	running := pendingPod("p", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
-	c, client := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,p"), running)
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,p"), running)
 	if err := c.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -155,20 +155,27 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 				}
 				limit := float64(d.MemoryMiB) * mib
 				used := l.MemoryFraction * limit
-				u.utilization += l.Utilization
+				// Like HAMi's monitor, utilization is in percent of the whole
+				// device; cores 0 means the allocation may use all of it.
+				cores := float64(d.Cores)
+				if cores == 0 || cores > 100 {
+					cores = 100
+				}
+				utilization := l.ComputeFraction * cores
+				u.utilization += utilization
 				u.memory += used
 
 				lv := []string{pod.Namespace, pod.Name, ctr, strconv.Itoa(vdev), d.UUID}
 				gauge(ch, vgpuMemoryUsed, used, lv...)
 				gauge(ch, vgpuMemoryLimit, limit, lv...)
 				gauge(ch, ctrMemory, used, lv...)
-				gauge(ch, ctrUtilization, l.Utilization, lv...)
+				gauge(ch, ctrUtilization, utilization, lv...)
 				if c.opts.Legacy {
 					gauge(ch, legacyVGPUMemoryUsed, used, lv...)
 					gauge(ch, legacyVGPUMemoryLimit, limit, lv...)
 					// context, module and data sizes are 0, so all of it is offset.
 					gauge(ch, legacyCtrMemory, used, append(lv, "0", "0", "0", strconv.FormatFloat(used, 'f', 0, 64))...)
-					gauge(ch, legacyCtrUtilization, l.Utilization, lv...)
+					gauge(ch, legacyCtrUtilization, utilization, lv...)
 				}
 			}
 		}

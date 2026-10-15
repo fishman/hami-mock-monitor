@@ -66,7 +66,7 @@ func TestSeedIsDeterministic(t *testing.T) {
 		if la != lb {
 			t.Fatalf("same seed, different values at %v: %+v vs %+v", at, la, lb)
 		}
-		if la.Utilization < 10 || la.Utilization > 90 || la.MemoryFraction < 0.1 || la.MemoryFraction > 0.9 {
+		if la.ComputeFraction < 0.1 || la.ComputeFraction > 0.9 || la.MemoryFraction < 0.1 || la.MemoryFraction > 0.9 {
 			t.Fatalf("value outside [min,max]: %+v", la)
 		}
 	}
@@ -92,13 +92,13 @@ func TestSeedIsDeterministic(t *testing.T) {
 func TestStaticSourceAndAnnotations(t *testing.T) {
 	r := newResolver(t, testConfig())
 	got, err := r.Load(pod("p", map[string]string{AnnotationSource: "static"}), "c", "GPU-0", t0)
-	if err != nil || got != (Load{Utilization: 40, MemoryFraction: 0.5}) {
+	if err != nil || got != (Load{ComputeFraction: 0.4, MemoryFraction: 0.5}) {
 		t.Fatalf("defaults: %+v, %v", got, err)
 	}
 	got, err = r.Load(pod("p", map[string]string{
 		AnnotationSource: "static", AnnotationUtilization: "75", AnnotationMemoryFraction: "0.25",
 	}), "c", "GPU-0", t0)
-	if err != nil || got != (Load{Utilization: 75, MemoryFraction: 0.25}) {
+	if err != nil || got != (Load{ComputeFraction: 0.75, MemoryFraction: 0.25}) {
 		t.Fatalf("annotations: %+v, %v", got, err)
 	}
 	for _, a := range []map[string]string{
@@ -159,9 +159,9 @@ func TestVLLMMapping(t *testing.T) {
 		pod  *corev1.Pod
 		want Load
 	}{
-		{defaultSeqs, Load{Utilization: 60, MemoryFraction: 0.25}}, // 3 of 5
-		{moreSeqs, Load{Utilization: 25, MemoryFraction: 0.25}},    // 3 of 12
-		{saturated, Load{Utilization: 100, MemoryFraction: 0.25}},  // capped
+		{defaultSeqs, Load{ComputeFraction: 0.6, MemoryFraction: 0.25}}, // 3 of 5
+		{moreSeqs, Load{ComputeFraction: 0.25, MemoryFraction: 0.25}},   // 3 of 12
+		{saturated, Load{ComputeFraction: 1, MemoryFraction: 0.25}},     // capped
 	} {
 		got, err := r.Load(tc.pod, "c", "GPU-0", t0)
 		if err != nil || got != tc.want {
@@ -198,7 +198,7 @@ func TestVLLMStaleness(t *testing.T) {
 	fail.Store(true)
 	r.Refresh(ctx, []*corev1.Pod{p}, t0.Add(30*time.Second))
 	got, err := r.Load(p, "c", "GPU-0", t0.Add(30*time.Second))
-	if err != nil || got.Utilization != 60 {
+	if err != nil || got.ComputeFraction != 0.6 {
 		t.Fatalf("within the staleness window: got %+v, %v; want the last value", got, err)
 	}
 	r.Refresh(ctx, []*corev1.Pod{p}, t0.Add(61*time.Second))

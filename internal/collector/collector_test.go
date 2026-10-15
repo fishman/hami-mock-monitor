@@ -27,7 +27,7 @@ func resolver(t *testing.T, source load.Source) *load.Resolver {
 	t.Helper()
 	r, err := load.NewResolver(load.Config{
 		Source: source, SeedPeriod: time.Minute, SeedMax: 100,
-		StaticUtilization: 70, StaticMemoryFraction: 0.5,
+		StaticUtilization: 50, StaticMemoryFraction: 0.5,
 		VLLMPort: 8000, VLLMPath: "/metrics", VLLMMaxNumSeqs: 5, ScrapeTimeout: time.Second,
 	})
 	if err != nil {
@@ -120,14 +120,14 @@ func TestContractNamesAndLabels(t *testing.T) {
 		ctrKey("hami_vgpu_memory_used_bytes", "llm", "main", 0, "GPU-0"):             256 * mib,
 		ctrKey("hami_vgpu_memory_limit_bytes", "llm", "main", 0, "GPU-0"):            512 * mib,
 		ctrKey("hami_container_device_memory_bytes", "llm", "main", 0, "GPU-0"):      256 * mib,
-		ctrKey("hami_container_device_utilization_ratio", "llm", "main", 0, "GPU-0"): 70,
+		ctrKey("hami_container_device_utilization_ratio", "llm", "main", 0, "GPU-0"): 15, // half of 30 cores
 	}
 	for i, uuid := range []string{"GPU-0", "GPU-1", "GPU-2"} {
 		want[hostKey("hami_host_gpu_memory_used_bytes", i, uuid)] = 0
 		want[hostKey("hami_host_gpu_utilization_ratio", i, uuid)] = 0
 	}
 	want[hostKey("hami_host_gpu_memory_used_bytes", 0, "GPU-0")] = 256 * mib
-	want[hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0")] = 70
+	want[hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0")] = 15
 	assertSeries(t, got, want)
 }
 
@@ -170,22 +170,26 @@ func TestMultiContainerMultiDevice(t *testing.T) {
 	}
 }
 
-func TestHostAggregationCaps(t *testing.T) {
-	// Two containers at 70% each share GPU-0 and claim 2 x 768 MiB of its 1024.
-	a := newPod("a", "GPU-0,NVIDIA,768,50:;", annotate(load.AnnotationMemoryFraction, "1"))
-	b := newPod("b", "GPU-0,NVIDIA,768,50:;", annotate(load.AnnotationMemoryFraction, "1"))
-	// 30% + 20% on GPU-1 stays below both caps.
-	c := newPod("c", "GPU-1,NVIDIA,512,50:;", annotate(load.AnnotationUtilization, "30"))
-	d := newPod("d", "GPU-1,NVIDIA,256,50:;", annotate(load.AnnotationUtilization, "20"))
+func TestUtilizationIsShareOfDeviceAndHostCaps(t *testing.T) {
+	// Two whole-device (cores 0) containers at 75% share GPU-0 and claim
+	// 2 x 768 MiB of its 1024: both host sums hit their caps.
+	a := newPod("a", "GPU-0,NVIDIA,768,0:;", annotate(load.AnnotationUtilization, "75"), annotate(load.AnnotationMemoryFraction, "1"))
+	b := newPod("b", "GPU-0,NVIDIA,768,0:;", annotate(load.AnnotationUtilization, "75"), annotate(load.AnnotationMemoryFraction, "1"))
+	// Half busy on 50 and on 20 cores: 25% and 10% of GPU-1.
+	c := newPod("c", "GPU-1,NVIDIA,512,50:;")
+	d := newPod("d", "GPU-1,NVIDIA,256,20:;")
 	_, reg := newCollector(t, Options{}, resolver(t, load.SourceStatic), a, b, c, d)
 	got := gather(t, reg)
 	const mib = 1 << 20
 	for k, want := range map[string]float64{
-		hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0"): 100,
-		hostKey("hami_host_gpu_memory_used_bytes", 0, "GPU-0"): 1024 * mib,
-		hostKey("hami_host_gpu_utilization_ratio", 1, "GPU-1"): 50,
-		hostKey("hami_host_gpu_memory_used_bytes", 1, "GPU-1"): 384 * mib,
-		hostKey("hami_host_gpu_utilization_ratio", 2, "GPU-2"): 0,
+		ctrKey("hami_container_device_utilization_ratio", "a", "main", 0, "GPU-0"): 75,
+		ctrKey("hami_container_device_utilization_ratio", "c", "main", 0, "GPU-1"): 25,
+		ctrKey("hami_container_device_utilization_ratio", "d", "main", 0, "GPU-1"): 10,
+		hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0"):                     100,
+		hostKey("hami_host_gpu_memory_used_bytes", 0, "GPU-0"):                     1024 * mib,
+		hostKey("hami_host_gpu_utilization_ratio", 1, "GPU-1"):                     35,
+		hostKey("hami_host_gpu_memory_used_bytes", 1, "GPU-1"):                     384 * mib,
+		hostKey("hami_host_gpu_utilization_ratio", 2, "GPU-2"):                     0,
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %v, want %v", k, got[k], want)
@@ -262,7 +266,7 @@ func TestLegacyMetrics(t *testing.T) {
 	const mib = 1 << 20
 	for k, want := range map[string]float64{
 		"vGPU_device_memory_usage_in_bytes{ctrname=main,deviceuuid=GPU-0,podname=llm,podnamespace=team-a,vdeviceid=0,zone=vGPU}": 256 * mib,
-		"HostCoreUtilization{deviceidx=0,devicetype=NVIDIA-A100,deviceuuid=GPU-0,nodeid=gpu-node-1,zone=vGPU}":                   70,
+		"HostCoreUtilization{deviceidx=0,devicetype=NVIDIA-A100,deviceuuid=GPU-0,nodeid=gpu-node-1,zone=vGPU}":                   50,
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %v, want %v", k, got[k], want)

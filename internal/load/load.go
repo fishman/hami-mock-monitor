@@ -60,10 +60,10 @@ var ErrNoSample = errors.New("no fresh vllm sample")
 // maxBody bounds a scraped response; vLLM's histograms stay far below it.
 const maxBody = 16 << 20
 
-// Load is the usage of one container device.
+// Load is the usage of one container device, relative to its allocation.
 type Load struct {
-	Utilization    float64 // SM utilization, 0-100
-	MemoryFraction float64 // share of the vGPU memory limit in use, 0-1
+	ComputeFraction float64 // share of the allocated cores in use, 0-1
+	MemoryFraction  float64 // share of the vGPU memory limit in use, 0-1
 }
 
 type Config struct {
@@ -71,10 +71,11 @@ type Config struct {
 
 	Seed       int64
 	SeedPeriod time.Duration
-	// SeedMin and SeedMax bound the curve in percent, for utilization and
-	// memory alike.
+	// SeedMin and SeedMax bound the curve in percent of the allocation, for
+	// compute and memory alike.
 	SeedMin, SeedMax float64
 
+	// StaticUtilization is the percent of the allocated cores in use.
 	StaticUtilization    float64
 	StaticMemoryFraction float64
 
@@ -160,7 +161,7 @@ func (r *Resolver) Load(pod *corev1.Pod, container, uuid string, now time.Time) 
 		if err != nil {
 			return Load{}, err
 		}
-		return Load{Utilization: u, MemoryFraction: f}, nil
+		return Load{ComputeFraction: u / 100, MemoryFraction: f}, nil
 	case SourceSeed:
 		seed := r.cfg.Seed
 		if v, ok := pod.Annotations[AnnotationSeed]; ok {
@@ -171,8 +172,8 @@ func (r *Resolver) Load(pod *corev1.Pod, container, uuid string, now time.Time) 
 		key := pod.Namespace + "/" + pod.Name + "/" + container + "/" + uuid
 		lo, span := r.cfg.SeedMin, r.cfg.SeedMax-r.cfg.SeedMin
 		return Load{
-			Utilization:    lo + span*wave(seed, key+"/utilization", r.cfg.SeedPeriod, now),
-			MemoryFraction: (lo + span*wave(seed, key+"/memory", r.cfg.SeedPeriod, now)) / 100,
+			ComputeFraction: (lo + span*wave(seed, key+"/utilization", r.cfg.SeedPeriod, now)) / 100,
+			MemoryFraction:  (lo + span*wave(seed, key+"/memory", r.cfg.SeedPeriod, now)) / 100,
 		}, nil
 	default:
 		r.mu.RLock()
@@ -269,8 +270,8 @@ func (r *Resolver) scrape(ctx context.Context, pod *corev1.Pod) (Load, error) {
 		}
 	}
 	return Load{
-		Utilization:    min(100, max(0, running/maxSeqs*100)),
-		MemoryFraction: min(1, max(0, kv)),
+		ComputeFraction: min(1, max(0, running/maxSeqs)),
+		MemoryFraction:  min(1, max(0, kv)),
 	}, nil
 }
 

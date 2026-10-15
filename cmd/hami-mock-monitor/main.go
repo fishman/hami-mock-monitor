@@ -58,13 +58,13 @@ func run() error {
 	)
 	flag.Int64Var(&cfg.Seed, "seed", 0, "seed source: seed of the curves")
 	flag.DurationVar(&cfg.SeedPeriod, "seed-period", 10*time.Minute, "seed source: period of the curves")
-	flag.Float64Var(&cfg.SeedMin, "seed-min", 10, "seed source: lower bound in percent, for utilization and memory")
-	flag.Float64Var(&cfg.SeedMax, "seed-max", 90, "seed source: upper bound in percent, for utilization and memory")
-	flag.Float64Var(&cfg.StaticUtilization, "static-utilization", 50, "static source: SM utilization, 0-100")
+	flag.Float64Var(&cfg.SeedMin, "seed-min", 10, "seed source: lower bound in percent of the allocation, for load and memory")
+	flag.Float64Var(&cfg.SeedMax, "seed-max", 90, "seed source: upper bound in percent of the allocation, for load and memory")
+	flag.Float64Var(&cfg.StaticUtilization, "static-utilization", 50, "static source: percent of the allocated cores in use, 0-100")
 	flag.Float64Var(&cfg.StaticMemoryFraction, "static-memory-fraction", 0.5, "static source: share of the memory limit in use, 0-1")
 	flag.IntVar(&cfg.VLLMPort, "vllm-port", 8000, "vllm source: port when the pod names none")
 	flag.StringVar(&cfg.VLLMPath, "vllm-path", "/metrics", "vllm source: metrics path")
-	flag.Float64Var(&cfg.VLLMMaxNumSeqs, "vllm-max-num-seqs", 5, "vllm source: running requests that mean 100% utilization")
+	flag.Float64Var(&cfg.VLLMMaxNumSeqs, "vllm-max-num-seqs", 5, "vllm source: running requests that mean full load")
 	flag.DurationVar(&cfg.ScrapeTimeout, "scrape-timeout", 5*time.Second, "vllm source: scrape timeout")
 	flag.DurationVar(&cfg.StaleAfter, "stale-after", time.Minute, "vllm source: how long a last value outlives failing scrapes")
 	flag.Parse()
@@ -103,8 +103,8 @@ func run() error {
 	}))
 	podInformer := factory.Core().V1().Pods()
 	pods := podInformer.Lister()
-	// Bind completion runs on every pod event as well as on its interval: the
-	// mock plugin's pod is only a candidate while Pending, which can be brief.
+	// Bind completion runs on every pod event as well as on its interval, so an
+	// open bind is completed as soon as the informer sees it.
 	podEvent := make(chan struct{}, 1)
 	if *completeBinds {
 		poke := func() {

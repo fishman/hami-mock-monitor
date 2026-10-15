@@ -50,11 +50,16 @@ Every series carries `zone="vGPU"`, as HAMi's monitor does.
 | `hami_vgpu_memory_used_bytes` | `namespace, pod, container, vdevice_index, device_uuid` | memory fraction x limit |
 | `hami_vgpu_memory_limit_bytes` | same | allocated memory (`mem_mib` x 2^20) |
 | `hami_container_device_memory_bytes` | same | same as `hami_vgpu_memory_used_bytes` |
-| `hami_container_device_utilization_ratio` | same | SM utilization, 0-100 |
+| `hami_container_device_utilization_ratio` | same | SM utilization in percent of the whole device: load x allocated cores (cores 0 = the whole device, 100) |
 | `hami_host_gpu_utilization_ratio` | `node, device_index, device_uuid, device_type` | sum over the device's containers, capped at 100 |
 | `hami_host_gpu_memory_used_bytes` | same | sum over the device's containers, capped at the device memory |
 
-`vdevice_index` is the device's position within the container's allocation.
+Every load source yields a share of the container's allocation, 0-1. The
+utilization multiplies it by the allocated cores from
+`hami.io/vgpu-devices-allocated`, so a container at full load on 30 cores
+reports 30, as HAMi's monitor reports the container's share of the device and
+consumers sum it. `vdevice_index` is the device's position within the
+container's allocation.
 `device_type` is the registered model, prefixed `NVIDIA-` when it lacks the
 prefix, as HAMi labels it. `device_index` is the registered `index`, or the
 list position when the registration leaves indices out.
@@ -82,16 +87,16 @@ Each pod picks its source with an annotation; `--load-source` sets the default
 | `load-source` | all | `vllm`, `seed` or `static` | `--load-source` (`seed`) |
 | `metrics-port` | vllm | port of the metrics endpoint | `--vllm-port` (`8000`) |
 | `metrics-path` | vllm | path of the metrics endpoint | `--vllm-path` (`/metrics`) |
-| `max-num-seqs` | vllm | running requests that mean 100% utilization | `--vllm-max-num-seqs` (`5`) |
+| `max-num-seqs` | vllm | running requests that mean full load | `--vllm-max-num-seqs` (`5`) |
 | `seed` | seed | seed of the curves | `--seed` (`0`) |
-| `utilization` | static | SM utilization, 0-100 | `--static-utilization` (`50`) |
+| `utilization` | static | percent of the allocated cores in use, 0-100 | `--static-utilization` (`50`) |
 | `memory-fraction` | static | share of the memory limit in use, 0-1 | `--static-memory-fraction` (`0.5`) |
 
 - **vllm** scrapes `http://<podIP>:<port><path>` every `--scrape-interval`
   (15s). Without the port annotation it uses the first container port named
   `metrics`, else one named `http`, else `--vllm-port`.
-  `vllm:num_requests_running / max-num-seqs` becomes the utilization (capped at
-  100) and `vllm:kv_cache_usage_perc` (0-1; `vllm:gpu_cache_usage_perc` on vLLM
+  `vllm:num_requests_running / max-num-seqs` (capped at 1) becomes the load
+  and `vllm:kv_cache_usage_perc` (0-1; `vllm:gpu_cache_usage_perc` on vLLM
   before 0.10) the memory fraction. Series of several engines are summed
   (requests) and averaged (cache). The values apply to every device of every
   container in the pod. A failed scrape keeps the last value for
@@ -99,8 +104,8 @@ Each pod picks its source with an annotation; `--load-source` sets the default
   succeeds again. Works with vLLM and with
   [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim).
 - **seed** follows a sine curve between `--seed-min` and `--seed-max` percent
-  (10, 90) with period `--seed-period` (10m), for utilization and memory
-  fraction alike. Each pod, container and device gets its own phase,
+  (10, 90) of the allocation with period `--seed-period` (10m), for load and
+  memory fraction alike. Each pod, container and device gets its own phase,
   `sha256(seed, namespace/pod/container/device)`, so the same seed always
   produces the same values at the same time.
 - **static** reports fixed values.
@@ -117,10 +122,12 @@ and the next pod on the node waits for the lock to expire (5 minutes by
 default).
 
 `--complete-binds` (chart: `completeBinds: true`, off by default) does that
-step instead: when the node lock names a pod that is bound to this node,
-Pending and `allocating`, it patches the pod to `success` (conditional on its
-UID) and releases the lock (conditional on the node's resourceVersion). It runs
-on every pod event and every `--complete-binds-interval` (2s), and is
+step instead. Every pod HAMi assigned and bound to this node that has not
+finished and is still `allocating` is patched to `success` (conditional on its
+UID), whether still Pending or already Running: on a mock node the container
+often starts before the monitor sees the pod. The node lock is released only
+when it names one of those pods (conditional on the node's resourceVersion). It
+runs on every pod event and every `--complete-binds-interval` (2s), and is
 idempotent. It is a workaround until the mock device plugin does this itself;
 [upstream/mock-device-plugin](upstream/mock-device-plugin) holds the prepared
 patch. It needs `patch` on pods and nodes, which the chart grants only when it

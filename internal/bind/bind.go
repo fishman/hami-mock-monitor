@@ -14,6 +14,7 @@ package bind
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -37,57 +38,68 @@ func New(client kubernetes.Interface, pods listerscorev1.PodLister, node string)
 	return &Completer{client: client, pods: pods, node: node}
 }
 
-// Reconcile completes the bind of the pod the node lock names, if that pod is
-// bound to this node, still Pending and allocating: it patches the pod to
-// success, then releases the lock. A pod already at success only gets its
-// lock released. Reconcile is idempotent and touches nothing else; without a
-// Pending candidate in the cache it makes no API call.
+// Reconcile completes every open bind on this node: each pod HAMi assigned and
+// bound here that has not finished and is still allocating, Pending or already
+// Running, is patched to success. The node lock is released when it names one
+// of them, or a Pending pod already at success (a run that died between the two
+// patches). Reconcile is idempotent; without such a pod in the cache it makes
+// no API call.
 func (c *Completer) Reconcile(ctx context.Context) error {
 	pods, err := c.pods.List(labels.SelectorFromSet(labels.Set{hami.AssignedNodeLabel: c.node}))
 	if err != nil {
 		return err
 	}
-	candidates := map[types.NamespacedName]*corev1.Pod{}
+	var open []*corev1.Pod
+	// done holds the pods whose bind is complete; the lock may still name one.
+	done := map[types.NamespacedName]bool{}
 	for _, p := range pods {
-		phase := p.Annotations[hami.BindPhaseAnnotation]
-		if p.Spec.NodeName == c.node && p.Status.Phase == corev1.PodPending &&
-			(phase == hami.BindPhaseAllocating || phase == hami.BindPhaseSuccess) {
-			candidates[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = p
+		if p.Spec.NodeName != c.node || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		switch p.Annotations[hami.BindPhaseAnnotation] {
+		case hami.BindPhaseAllocating:
+			open = append(open, p)
+		case hami.BindPhaseSuccess:
+			if p.Status.Phase == corev1.PodPending {
+				done[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
+			}
 		}
 	}
-	if len(candidates) == 0 {
+	if len(open) == 0 && len(done) == 0 {
 		return nil
 	}
 
-	node, err := c.client.CoreV1().Nodes().Get(ctx, c.node, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get node %s: %w", c.node, err)
-	}
-	ns, name, ok := hami.ParseNodeLock(node.Annotations[hami.NodeLockAnnotation])
-	if !ok {
-		return nil
-	}
-	pod := candidates[types.NamespacedName{Namespace: ns, Name: name}]
-	if pod == nil {
-		return nil
-	}
-
-	if pod.Annotations[hami.BindPhaseAnnotation] == hami.BindPhaseAllocating {
+	var errs []error
+	for _, p := range open {
 		// The uid makes the patch fail rather than land on a successor pod
 		// that reused the name.
 		patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
-			"uid":         pod.UID,
+			"uid":         p.UID,
 			"annotations": map[string]string{hami.BindPhaseAnnotation: hami.BindPhaseSuccess},
 		}})
 		if err != nil {
 			return err
 		}
-		if _, err := c.client.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-			return fmt.Errorf("complete bind of %s/%s: %w", ns, name, err)
+		if _, err := c.client.CoreV1().Pods(p.Namespace).Patch(ctx, p.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+			errs = append(errs, fmt.Errorf("complete bind of %s/%s: %w", p.Namespace, p.Name, err))
+			continue
 		}
-		slog.Info("completed bind", "pod", ns+"/"+name)
+		done[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
+		slog.Info("completed bind", "pod", p.Namespace+"/"+p.Name)
 	}
+	return errors.Join(append(errs, c.releaseLock(ctx, done))...)
+}
 
+// releaseLock removes the node lock if it names a pod in done.
+func (c *Completer) releaseLock(ctx context.Context, done map[types.NamespacedName]bool) error {
+	node, err := c.client.CoreV1().Nodes().Get(ctx, c.node, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get node %s: %w", c.node, err)
+	}
+	ns, name, ok := hami.ParseNodeLock(node.Annotations[hami.NodeLockAnnotation])
+	if !ok || !done[types.NamespacedName{Namespace: ns, Name: name}] {
+		return nil
+	}
 	// The resourceVersion makes the release conditional on the lock read above.
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"resourceVersion": node.ResourceVersion,

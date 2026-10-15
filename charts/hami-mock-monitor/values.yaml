@@ -19,9 +19,9 @@ legacyMetrics: false
 # Count pods whose hami.io/bind-phase is still allocating. Needed with an
 # unpatched mock device plugin unless completeBinds is on.
 countAllocating: false
-# Mark the pod named by the node lock hami.io/bind-phase=success and release
-# the lock, as the real device plugin does. A workaround for the mock device
-# plugin; grants patch on pods and nodes.
+# Mark this node's pods still at hami.io/bind-phase=allocating success and
+# release the node lock that names one of them, as the real device plugin
+# does. A workaround for the mock device plugin; grants patch on pods and nodes.
 completeBinds: false
 # Further flags, e.g. ["--seed=42", "--vllm-max-num-seqs=8"]; see --help.
 extraArgs: []
