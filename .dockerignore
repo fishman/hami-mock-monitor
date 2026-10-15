@@ -1,0 +1,10 @@
+# Allowlist: only what the Dockerfile reads, so charts, docs and tests never
+# invalidate the build or change the image tag.
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+**/*_test.go
+**/testdata
+**/*.md
