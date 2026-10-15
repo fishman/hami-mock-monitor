@@ -104,8 +104,8 @@ Each pod picks its source with an annotation; `--load-source` sets the default
   full the pool is. Set the annotation to the pod's
   `--gpu-memory-utilization` when it differs. The values apply to every device
   of every container in the pod. A failed scrape keeps the last value for
-  `--stale-after` (1m); after that the series are dropped, memory included,
-  until a scrape succeeds again. Works with vLLM and with
+  `--stale-after` (1m, at least `--scrape-interval`); after that the series
+  are dropped, memory included, until a scrape succeeds again. Works with vLLM and with
   [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim).
 - **seed** follows a sine curve between `--seed-min` and `--seed-max` percent
   (10, 90) of the allocation with period `--seed-period` (10m), for load and
@@ -130,8 +130,10 @@ step instead. Every pod HAMi assigned and bound to this node that has not
 finished and is still `allocating` is patched to `success` (conditional on its
 UID), whether still Pending or already Running: on a mock node the container
 often starts before the monitor sees the pod. The node lock is released only
-when it names one of those pods (conditional on the node's resourceVersion). It
-runs on every pod event and every `--complete-binds-interval` (2s), and is
+when it names one of those pods or another pod of this node already at
+`success`, since such a lock is stale (conditional on the node's
+resourceVersion). While the node has such pods, each run reads the node once.
+It runs on every pod event and every `--complete-binds-interval` (2s), and is
 idempotent. It is a workaround until the mock device plugin does this itself;
 [upstream/mock-device-plugin](upstream/mock-device-plugin) holds the prepared
 patch. It needs `patch` on pods and nodes, which the chart grants only when it

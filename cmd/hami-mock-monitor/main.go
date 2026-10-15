@@ -77,6 +77,11 @@ func run() error {
 	if *bindInterval <= 0 || *nodeInterval <= 0 || *scrapeInterval <= 0 {
 		return errors.New("intervals must be positive")
 	}
+	// Staleness counts from the last good sample, so a shorter window would
+	// drop vllm series between two successful scrapes.
+	if cfg.StaleAfter < *scrapeInterval {
+		return fmt.Errorf("--stale-after (%s) must be at least --scrape-interval (%s)", cfg.StaleAfter, *scrapeInterval)
+	}
 	loads, err := load.NewResolver(cfg)
 	if err != nil {
 		return err

@@ -63,6 +63,13 @@ rules), which grants nodes only. It needs the same rule, in a separate PR:
   patched onto the node status by hand in a mock setup.
 - Like HAMi's own plugins, the owner-less fallback picks the first matching
   Pending pod; it does not match the allocation request to a specific pod.
+- The pod the lock names is completed without checking that it is the pod
+  kubelet is allocating for, as in HAMi's `GetPendingPod`. Since the mock
+  releases the lock on a pod's first `Allocate`, the scheduler can lock the next
+  pod before kubelet allocates the first pod's remaining GPU containers; their
+  `Allocate` calls then mark that next pod `success` before its own `Allocate`.
+  Harmless for a mock (no device setup depends on it), but its bind completes
+  early.
 
 ## Testing
 

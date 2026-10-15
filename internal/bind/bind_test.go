@@ -189,6 +189,22 @@ func TestReleasesLockOfAlreadyCompletedPod(t *testing.T) {
 	}
 }
 
+func TestReleasesLockNamingRunningSuccessPod(t *testing.T) {
+	// The release failed earlier (e.g. a resourceVersion conflict) and the
+	// container started meanwhile: the lock is still stale.
+	running := pendingPod("done", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,done"), running)
+	if err := c.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if v, held := lock(t, client); held {
+		t.Errorf("node lock %q not released", v)
+	}
+	if p := patches(client); len(p) != 1 || p[0].GetResource().Resource != "nodes" {
+		t.Errorf("want exactly the node patch, got %d patches", len(p))
+	}
+}
+
 func TestLeavesOtherPodsAlone(t *testing.T) {
 	for name, pod := range map[string]*corev1.Pod{
 		"pod bound elsewhere": pendingPod("p", hami.BindPhaseAllocating, func(p *corev1.Pod) { p.Spec.NodeName = "other-node" }),
@@ -209,12 +225,14 @@ func TestLeavesOtherPodsAlone(t *testing.T) {
 }
 
 func TestNoCandidateNoAPICalls(t *testing.T) {
-	running := pendingPod("p", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
-	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,p"), running)
+	// Neither an open bind nor a completed one on this node.
+	failed := pendingPod("p", "failed")
+	elsewhere := pendingPod("q", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Spec.NodeName = "other-node" })
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,q"), failed, elsewhere)
 	if err := c.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if a := client.Actions(); len(a) != 0 {
-		t.Errorf("want no API calls without a pending pod, got %v", a)
+		t.Errorf("want no API calls without a candidate pod, got %v", a)
 	}
 }

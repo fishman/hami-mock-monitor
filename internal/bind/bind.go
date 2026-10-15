@@ -41,9 +41,10 @@ func New(client kubernetes.Interface, pods listerscorev1.PodLister, node string)
 // Reconcile completes every open bind on this node: each pod HAMi assigned and
 // bound here that has not finished and is still allocating, Pending or already
 // Running, is patched to success. The node lock is released when it names one
-// of them, or a Pending pod already at success (a run that died between the two
-// patches). Reconcile is idempotent; without such a pod in the cache it makes
-// no API call.
+// of them or any other pod of this node at success: the device plugin and this
+// completer both set success before they release the lock, so such a lock is
+// stale (a release that failed or a run that died between the two patches).
+// Reconcile is idempotent; without such a pod in the cache it makes no API call.
 func (c *Completer) Reconcile(ctx context.Context) error {
 	pods, err := c.pods.List(labels.SelectorFromSet(labels.Set{hami.AssignedNodeLabel: c.node}))
 	if err != nil {
@@ -53,16 +54,16 @@ func (c *Completer) Reconcile(ctx context.Context) error {
 	// done holds the pods whose bind is complete; the lock may still name one.
 	done := map[types.NamespacedName]bool{}
 	for _, p := range pods {
-		if p.Spec.NodeName != c.node || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		if p.Spec.NodeName != c.node {
 			continue
 		}
 		switch p.Annotations[hami.BindPhaseAnnotation] {
 		case hami.BindPhaseAllocating:
-			open = append(open, p)
-		case hami.BindPhaseSuccess:
-			if p.Status.Phase == corev1.PodPending {
-				done[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
+			if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+				open = append(open, p)
 			}
+		case hami.BindPhaseSuccess:
+			done[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
 		}
 	}
 	if len(open) == 0 && len(done) == 0 {
