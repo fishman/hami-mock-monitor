@@ -33,6 +33,7 @@ func testConfig() Config {
 		VLLMPort:             8000,
 		VLLMPath:             "/metrics",
 		VLLMMaxNumSeqs:       5,
+		VLLMMemoryFraction:   0.9,
 		ScrapeTimeout:        time.Second,
 		StaleAfter:           time.Minute,
 	}
@@ -152,16 +153,17 @@ func TestVLLMMapping(t *testing.T) {
 	r := newResolver(t, testConfig())
 	defaultSeqs := vllmPod("a", port, nil)
 	moreSeqs := vllmPod("b", port, map[string]string{AnnotationMaxNumSeqs: "12"})
-	saturated := vllmPod("c", port, map[string]string{AnnotationMaxNumSeqs: "2"})
+	saturated := vllmPod("c", port, map[string]string{AnnotationMaxNumSeqs: "2", AnnotationMemoryFraction: "0.5"})
 	r.Refresh(context.Background(), []*corev1.Pod{defaultSeqs, moreSeqs, saturated}, t0)
 
+	// Memory is the pre-allocated pool, whatever the KV cache usage (0.25).
 	for _, tc := range []struct {
 		pod  *corev1.Pod
 		want Load
 	}{
-		{defaultSeqs, Load{ComputeFraction: 0.6, MemoryFraction: 0.25}}, // 3 of 5
-		{moreSeqs, Load{ComputeFraction: 0.25, MemoryFraction: 0.25}},   // 3 of 12
-		{saturated, Load{ComputeFraction: 1, MemoryFraction: 0.25}},     // capped
+		{defaultSeqs, Load{ComputeFraction: 0.6, MemoryFraction: 0.9}}, // 3 of 5
+		{moreSeqs, Load{ComputeFraction: 0.25, MemoryFraction: 0.9}},   // 3 of 12
+		{saturated, Load{ComputeFraction: 1, MemoryFraction: 0.5}},     // capped, annotated pool
 	} {
 		got, err := r.Load(tc.pod, "c", "GPU-0", t0)
 		if err != nil || got != tc.want {
@@ -214,12 +216,24 @@ func TestVLLMStaleness(t *testing.T) {
 	}
 }
 
+func TestVLLMIdlePodKeepsPreallocatedMemory(t *testing.T) {
+	// vLLM reserves its memory pool at startup: idle is no compute, full pool.
+	port, _ := vllmServer(t, "vllm:num_requests_running 0\nvllm:kv_cache_usage_perc 0\n")
+	r := newResolver(t, testConfig())
+	p := vllmPod("a", port, nil)
+	r.Refresh(context.Background(), []*corev1.Pod{p}, t0)
+	got, err := r.Load(p, "c", "GPU-0", t0)
+	if err != nil || got != (Load{ComputeFraction: 0, MemoryFraction: 0.9}) {
+		t.Fatalf("idle pod: got %+v, %v; want no compute and the 0.9 pool", got, err)
+	}
+}
+
 func TestVLLMMissingMetricIsNoSample(t *testing.T) {
-	port, _ := vllmServer(t, "# TYPE vllm:num_requests_running gauge\nvllm:num_requests_running 1\n")
+	port, _ := vllmServer(t, "# TYPE vllm:kv_cache_usage_perc gauge\nvllm:kv_cache_usage_perc 0.5\n")
 	r := newResolver(t, testConfig())
 	p := vllmPod("a", port, nil)
 	r.Refresh(context.Background(), []*corev1.Pod{p}, t0)
 	if _, err := r.Load(p, "c", "GPU-0", t0); !errors.Is(err, ErrNoSample) {
-		t.Fatalf("without kv cache usage: want ErrNoSample, got %v", err)
+		t.Fatalf("without vllm:num_requests_running: want ErrNoSample, got %v", err)
 	}
 }

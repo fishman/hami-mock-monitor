@@ -65,6 +65,7 @@ func run() error {
 	flag.IntVar(&cfg.VLLMPort, "vllm-port", 8000, "vllm source: port when the pod names none")
 	flag.StringVar(&cfg.VLLMPath, "vllm-path", "/metrics", "vllm source: metrics path")
 	flag.Float64Var(&cfg.VLLMMaxNumSeqs, "vllm-max-num-seqs", 5, "vllm source: running requests that mean full load")
+	flag.Float64Var(&cfg.VLLMMemoryFraction, "vllm-memory-fraction", 0.9, "vllm source: share of the memory limit vLLM pre-allocates (its gpu-memory-utilization), 0-1")
 	flag.DurationVar(&cfg.ScrapeTimeout, "scrape-timeout", 5*time.Second, "vllm source: scrape timeout")
 	flag.DurationVar(&cfg.StaleAfter, "stale-after", time.Minute, "vllm source: how long a last value outlives failing scrapes")
 	flag.Parse()

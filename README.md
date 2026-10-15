@@ -90,18 +90,22 @@ Each pod picks its source with an annotation; `--load-source` sets the default
 | `max-num-seqs` | vllm | running requests that mean full load | `--vllm-max-num-seqs` (`5`) |
 | `seed` | seed | seed of the curves | `--seed` (`0`) |
 | `utilization` | static | percent of the allocated cores in use, 0-100 | `--static-utilization` (`50`) |
-| `memory-fraction` | static | share of the memory limit in use, 0-1 | `--static-memory-fraction` (`0.5`) |
+| `memory-fraction` | static, vllm | share of the memory limit in use, 0-1 | `--static-memory-fraction` (`0.5`), `--vllm-memory-fraction` (`0.9`) |
 
 - **vllm** scrapes `http://<podIP>:<port><path>` every `--scrape-interval`
   (15s). Without the port annotation it uses the first container port named
   `metrics`, else one named `http`, else `--vllm-port`.
-  `vllm:num_requests_running / max-num-seqs` (capped at 1) becomes the load
-  and `vllm:kv_cache_usage_perc` (0-1; `vllm:gpu_cache_usage_perc` on vLLM
-  before 0.10) the memory fraction. Series of several engines are summed
-  (requests) and averaged (cache). The values apply to every device of every
-  container in the pod. A failed scrape keeps the last value for
-  `--stale-after` (1m); after that the series are dropped until a scrape
-  succeeds again. Works with vLLM and with
+  `vllm:num_requests_running / max-num-seqs` (capped at 1, summed over
+  engines) becomes the load. Memory in use is `memory-fraction` x the memory
+  limit, constant while the endpoint answers: vLLM pre-allocates
+  `--gpu-memory-utilization` (default 0.9) of the device memory at startup and
+  keeps its KV cache inside that pool, so a real vLLM pod uses about that much
+  memory whether idle or busy, and `vllm:kv_cache_usage_perc` only says how
+  full the pool is. Set the annotation to the pod's
+  `--gpu-memory-utilization` when it differs. The values apply to every device
+  of every container in the pod. A failed scrape keeps the last value for
+  `--stale-after` (1m); after that the series are dropped, memory included,
+  until a scrape succeeds again. Works with vLLM and with
   [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim).
 - **seed** follows a sine curve between `--seed-min` and `--seed-max` percent
   (10, 90) of the allocation with period `--seed-period` (10m), for load and
@@ -194,7 +198,7 @@ spec:
         - --model=fake-model
         - --port=8000
         - --max-num-seqs=5
-        - '--fake-metrics={"running-requests":"oscillate:0:5:2m","kv-cache-usage":"oscillate:0.1:0.8:2m"}'
+        - '--fake-metrics={"running-requests":"oscillate:0:5:2m"}'
       ports:
         - name: http
           containerPort: 8000

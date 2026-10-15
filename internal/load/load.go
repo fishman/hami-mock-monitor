@@ -82,7 +82,10 @@ type Config struct {
 	VLLMPort       int
 	VLLMPath       string
 	VLLMMaxNumSeqs float64
-	ScrapeTimeout  time.Duration
+	// VLLMMemoryFraction is the share of the memory limit vLLM pre-allocates
+	// (its gpu-memory-utilization).
+	VLLMMemoryFraction float64
+	ScrapeTimeout      time.Duration
 	// StaleAfter is how long a vllm pod's last sample outlives failing scrapes.
 	StaleAfter time.Duration
 }
@@ -120,6 +123,8 @@ func NewResolver(cfg Config) (*Resolver, error) {
 		return nil, errors.New("vllm metrics path must start with /")
 	case !(cfg.VLLMMaxNumSeqs >= 1):
 		return nil, errors.New("vllm max-num-seqs must be at least 1")
+	case !(cfg.VLLMMemoryFraction >= 0 && cfg.VLLMMemoryFraction <= 1):
+		return nil, errors.New("vllm memory fraction must be in [0, 1]")
 	case cfg.ScrapeTimeout <= 0:
 		return nil, errors.New("scrape timeout must be positive")
 	case cfg.StaleAfter < 0:
@@ -258,25 +263,22 @@ func (r *Resolver) scrape(ctx context.Context, pod *corev1.Pod) (Load, error) {
 	if err != nil {
 		return Load{}, fmt.Errorf("parse %s: %w", target, err)
 	}
-	running, ok := aggregate(families["vllm:num_requests_running"], false)
+	running, ok := sumGauges(families["vllm:num_requests_running"])
 	if !ok {
 		return Load{}, fmt.Errorf("%s: no vllm:num_requests_running", target)
 	}
-	kv, ok := aggregate(families["vllm:kv_cache_usage_perc"], true)
-	if !ok {
-		// vLLM before 0.10 named it gpu_cache_usage_perc.
-		if kv, ok = aggregate(families["vllm:gpu_cache_usage_perc"], true); !ok {
-			return Load{}, fmt.Errorf("%s: no vllm:kv_cache_usage_perc", target)
-		}
+	// vLLM reserves its memory pool (gpu-memory-utilization) at startup and
+	// keeps the KV cache inside it, so memory in use is the pool, not the
+	// cache usage, and stays put while the endpoint answers.
+	memory, err := annotationFloat(pod, AnnotationMemoryFraction, r.cfg.VLLMMemoryFraction, 0, 1)
+	if err != nil {
+		return Load{}, err
 	}
-	return Load{
-		ComputeFraction: min(1, max(0, running/maxSeqs)),
-		MemoryFraction:  min(1, max(0, kv)),
-	}, nil
+	return Load{ComputeFraction: min(1, max(0, running/maxSeqs)), MemoryFraction: memory}, nil
 }
 
-// aggregate sums (or averages) a family's series, e.g. one per engine.
-func aggregate(mf *dto.MetricFamily, mean bool) (float64, bool) {
+// sumGauges sums a family's series, e.g. one per engine.
+func sumGauges(mf *dto.MetricFamily) (float64, bool) {
 	if mf == nil || len(mf.GetMetric()) == 0 {
 		return 0, false
 	}
@@ -290,9 +292,6 @@ func aggregate(mf *dto.MetricFamily, mean bool) (float64, bool) {
 		default:
 			return 0, false
 		}
-	}
-	if mean {
-		sum /= float64(len(mf.GetMetric()))
 	}
 	return sum, true
 }
