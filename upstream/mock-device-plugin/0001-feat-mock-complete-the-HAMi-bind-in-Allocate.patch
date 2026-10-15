@@ -1,0 +1,408 @@
+From 3166f927497e4367e076becffd5061318604531a Mon Sep 17 00:00:00 2001
+From: Reza Jelveh <agent@jelveh.me>
+Date: Thu, 15 Oct 2026 14:51:29 +0000
+Subject: [PATCH] feat(mock): complete the HAMi bind in Allocate
+
+HAMi's scheduler marks a pod hami.io/bind-phase=allocating and takes the
+node lock hami.io/mutex.lock in Bind. The real device plugins finish that
+at the end of Allocate: they mark the pod success and release the lock.
+The mock plugin's Allocate returned empty responses only, so every mocked
+pod stayed "allocating" forever and the next pod on the node waited for
+the lock to expire (5 minutes by default) before it could be bound.
+
+Allocate now resolves the pod like HAMi's util.GetPendingPod (the pod the
+node lock names, else a Pending allocating pod bound to this node),
+patches hami.io/bind-phase=success (conditional on the pod uid) and
+releases the lock (conditional on the node resourceVersion). kubelet
+calls Allocate once per mocked resource a container requests, so the
+completion is idempotent; a failure is logged and never fails Allocate.
+
+The plugin needs pods get/list/patch for this; k8s-mock-rbac.yaml grants
+it. Tests use the fake clientset.
+
+Signed-off-by: Reza Jelveh <agent@jelveh.me>
+---
+ go.mod                         |   2 +
+ go.sum                         |   4 +
+ internal/pkg/mock/bind.go      | 127 +++++++++++++++++++++++++++++
+ internal/pkg/mock/bind_test.go | 142 +++++++++++++++++++++++++++++++++
+ internal/pkg/mock/server.go    |   9 +++
+ k8s-mock-rbac.yaml             |   5 ++
+ 6 files changed, 289 insertions(+)
+ create mode 100644 internal/pkg/mock/bind.go
+ create mode 100644 internal/pkg/mock/bind_test.go
+
+diff --git a/go.mod b/go.mod
+index 56a6f5b..0dae9ba 100644
+--- a/go.mod
++++ b/go.mod
+@@ -17,6 +17,7 @@ require (
+ require (
+ 	github.com/davecgh/go-spew v1.1.1 // indirect
+ 	github.com/emicklei/go-restful/v3 v3.9.0 // indirect
++	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
+ 	github.com/fsnotify/fsnotify v1.4.9 // indirect
+ 	github.com/go-logr/logr v1.2.4 // indirect
+ 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
+@@ -37,6 +38,7 @@ require (
+ 	github.com/modern-go/reflect2 v1.0.2 // indirect
+ 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+ 	github.com/onsi/ginkgo v1.14.1 // indirect
++	github.com/pkg/errors v0.9.1 // indirect
+ 	github.com/spf13/pflag v1.0.5 // indirect
+ 	golang.org/x/net v0.17.0 // indirect
+ 	golang.org/x/oauth2 v0.8.0 // indirect
+diff --git a/go.sum b/go.sum
+index 29e226b..c71121b 100644
+--- a/go.sum
++++ b/go.sum
+@@ -22,6 +22,8 @@ github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.m
+ github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1mIlRU8Am5FuJP05cCM98=
+ github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
+ github.com/evanphx/json-patch v0.0.0-20200808040245-162e5629780b/go.mod h1:NAJj0yf/KaRKURN6nyi7A9IZydMivZEm9oQLWNjfKDc=
++github.com/evanphx/json-patch v4.12.0+incompatible h1:4onqiflcdA9EOZ4RxV643DvftH5pOlLGNtQ5lPWQu84=
++github.com/evanphx/json-patch v4.12.0+incompatible/go.mod h1:50XU6AFN0ol/bzJsmQLiYLvXMP4fmwYFNcr97nuDLSk=
+ github.com/fsnotify/fsnotify v1.4.7/go.mod h1:jwhsz4b93w/PPRr/qN1Yymfu8t87LnFCMoQvtojpjFo=
+ github.com/fsnotify/fsnotify v1.4.9 h1:hsms1Qyu0jgnwNXIxa+/V/PDsU6CfLf6CNO8H7IWoS4=
+ github.com/fsnotify/fsnotify v1.4.9/go.mod h1:znqG4EE+3YCdAaPaxE2ZRY/06pZUdp0tY4IgpuI1SZQ=
+@@ -142,6 +144,8 @@ github.com/onsi/gomega v1.10.1/go.mod h1:iN09h71vgCQne3DLsj+A5owkum+a2tYe+TOCB1y
+ github.com/onsi/gomega v1.27.6 h1:ENqfyGeS5AX/rlXDd/ETokDz93u0YufY1Pgxuy/PvWE=
+ github.com/onsi/gomega v1.27.6/go.mod h1:PIQNjfQwkP3aQAH7lf7j87O/5FiNr+ZR8+ipb+qQlhg=
+ github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
++github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
++github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
+diff --git a/internal/pkg/mock/bind.go b/internal/pkg/mock/bind.go
+new file mode 100644
+index 0000000..d539d02
+--- /dev/null
++++ b/internal/pkg/mock/bind.go
+@@ -0,0 +1,127 @@
++/*
++Copyright 2026 The HAMi Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package mock
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/client-go/kubernetes"
++	"k8s.io/klog/v2"
++)
++
++// HAMi scheduler conventions (HAMi pkg/util/types.go, pkg/util/nodelock).
++const (
++	assignedNodeAnnotation = "hami.io/vgpu-node"
++	bindTimeAnnotation     = "hami.io/bind-time"
++	bindPhaseAnnotation    = "hami.io/bind-phase"
++	bindPhaseAllocating    = "allocating"
++	bindPhaseSuccess       = "success"
++	nodeLockAnnotation     = "hami.io/mutex.lock"
++)
++
++// completeBind does what HAMi's device plugins do at the end of Allocate: mark
++// the pod HAMi is binding on this node hami.io/bind-phase=success and release
++// the node lock HAMi's scheduler took in Bind. Without it the pod stays
++// "allocating" and the next pod on the node waits for the lock to expire.
++//
++// kubelet calls Allocate once per mocked resource a container requests, so
++// this must be idempotent: once the pod is marked and the lock is released,
++// later calls find nothing to do.
++func completeBind(ctx context.Context, c kubernetes.Interface, nodeName string) error {
++	if nodeName == "" {
++		return errors.New("NODE_NAME is not set")
++	}
++	node, err := c.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
++	if err != nil {
++		return err
++	}
++	pod, err := bindingPod(ctx, c, node)
++	if err != nil || pod == nil {
++		return err
++	}
++	if pod.Annotations[bindPhaseAnnotation] != bindPhaseSuccess {
++		// The uid makes the patch fail rather than land on a pod that
++		// reused the name.
++		patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
++			"uid":         pod.UID,
++			"annotations": map[string]string{bindPhaseAnnotation: bindPhaseSuccess},
++		}})
++		if err != nil {
++			return err
++		}
++		if _, err := c.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
++			return fmt.Errorf("patch pod %s/%s: %w", pod.Namespace, pod.Name, err)
++		}
++		klog.Infof("HAMi bind of pod %s/%s completed", pod.Namespace, pod.Name)
++	}
++	return releaseNodeLock(ctx, c, node, pod)
++}
++
++// bindingPod mirrors HAMi's util.GetPendingPod: the pod the node lock names,
++// else, without a lock owner, a Pending pod HAMi is binding to this node.
++func bindingPod(ctx context.Context, c kubernetes.Interface, node *corev1.Node) (*corev1.Pod, error) {
++	// The lock is "RFC3339,namespace,name"; the legacy form is a bare timestamp.
++	if lock := node.Annotations[nodeLockAnnotation]; strings.Contains(lock, ",") {
++		f := strings.Split(lock, ",")
++		if len(f) != 3 || f[1] == "" || f[2] == "" {
++			return nil, fmt.Errorf("malformed node lock %q", lock)
++		}
++		return c.CoreV1().Pods(f[1]).Get(ctx, f[2], metav1.GetOptions{})
++	}
++	pods, err := c.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + node.Name})
++	if err != nil {
++		return nil, err
++	}
++	for i := range pods.Items {
++		p := &pods.Items[i]
++		if _, ok := p.Annotations[bindTimeAnnotation]; ok && p.Status.Phase == corev1.PodPending &&
++			p.Annotations[bindPhaseAnnotation] == bindPhaseAllocating &&
++			p.Annotations[assignedNodeAnnotation] == node.Name {
++			return p, nil
++		}
++	}
++	return nil, nil
++}
++
++// releaseNodeLock removes the node lock, which bindingPod ensured is either
++// held by pod or in the legacy owner-less form, as HAMi's
++// nodelock.ReleaseNodeLock does.
++func releaseNodeLock(ctx context.Context, c kubernetes.Interface, node *corev1.Node, pod *corev1.Pod) error {
++	if _, ok := node.Annotations[nodeLockAnnotation]; !ok {
++		return nil
++	}
++	// The resourceVersion makes the release conditional on the lock read above.
++	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
++		"resourceVersion": node.ResourceVersion,
++		"annotations":     map[string]any{nodeLockAnnotation: nil},
++	}})
++	if err != nil {
++		return err
++	}
++	if _, err := c.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
++		return fmt.Errorf("release node lock of %s: %w", node.Name, err)
++	}
++	klog.Infof("HAMi node lock of %s released for pod %s/%s", node.Name, pod.Namespace, pod.Name)
++	return nil
++}
+diff --git a/internal/pkg/mock/bind_test.go b/internal/pkg/mock/bind_test.go
+new file mode 100644
+index 0000000..b804715
+--- /dev/null
++++ b/internal/pkg/mock/bind_test.go
+@@ -0,0 +1,142 @@
++/*
++Copyright 2026 The HAMi Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package mock
++
++import (
++	"context"
++	"testing"
++
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/client-go/kubernetes/fake"
++	k8stesting "k8s.io/client-go/testing"
++)
++
++const testNode = "node-1"
++
++func bindingTestPod(name string) *corev1.Pod {
++	return &corev1.Pod{
++		ObjectMeta: metav1.ObjectMeta{
++			Namespace: "default", Name: name, UID: types.UID("uid-" + name),
++			Annotations: map[string]string{
++				assignedNodeAnnotation: testNode,
++				bindTimeAnnotation:     "1792065600",
++				bindPhaseAnnotation:    bindPhaseAllocating,
++			},
++		},
++		Spec:   corev1.PodSpec{NodeName: testNode},
++		Status: corev1.PodStatus{Phase: corev1.PodPending},
++	}
++}
++
++func testNodeWithLock(lock string) *corev1.Node {
++	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testNode, ResourceVersion: "1"}}
++	if lock != "" {
++		n.Annotations = map[string]string{nodeLockAnnotation: lock}
++	}
++	return n
++}
++
++func assertBindPhase(t *testing.T, c *fake.Clientset, name, want string) {
++	t.Helper()
++	p, err := c.CoreV1().Pods("default").Get(context.Background(), name, metav1.GetOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := p.Annotations[bindPhaseAnnotation]; got != want {
++		t.Errorf("pod %s: bind phase %q, want %q", name, got, want)
++	}
++}
++
++func assertNoLock(t *testing.T, c *fake.Clientset) {
++	t.Helper()
++	n, err := c.CoreV1().Nodes().Get(context.Background(), testNode, metav1.GetOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if v, ok := n.Annotations[nodeLockAnnotation]; ok {
++		t.Errorf("node lock %q not released", v)
++	}
++}
++
++func countPatches(c *fake.Clientset) int {
++	n := 0
++	for _, a := range c.Actions() {
++		if _, ok := a.(k8stesting.PatchAction); ok {
++			n++
++		}
++	}
++	return n
++}
++
++func TestCompleteBindLockedPod(t *testing.T) {
++	ctx := context.Background()
++	c := fake.NewSimpleClientset(
++		testNodeWithLock("2026-10-15T10:00:00Z,default,locked"),
++		bindingTestPod("locked"),
++		bindingTestPod("next"),
++	)
++	if err := completeBind(ctx, c, testNode); err != nil {
++		t.Fatal(err)
++	}
++	assertBindPhase(t, c, "locked", bindPhaseSuccess)
++	assertBindPhase(t, c, "next", bindPhaseAllocating)
++	assertNoLock(t, c)
++}
++
++func TestCompleteBindIsIdempotent(t *testing.T) {
++	ctx := context.Background()
++	c := fake.NewSimpleClientset(testNodeWithLock("2026-10-15T10:00:00Z,default,only"), bindingTestPod("only"))
++	if err := completeBind(ctx, c, testNode); err != nil {
++		t.Fatal(err)
++	}
++	c.ClearActions()
++	if err := completeBind(ctx, c, testNode); err != nil {
++		t.Fatal(err)
++	}
++	if n := countPatches(c); n != 0 {
++		t.Errorf("second call patched %d objects", n)
++	}
++	assertBindPhase(t, c, "only", bindPhaseSuccess)
++	assertNoLock(t, c)
++}
++
++func TestCompleteBindWithoutLockFallsBackToPendingPod(t *testing.T) {
++	running := bindingTestPod("running")
++	running.Status.Phase = corev1.PodRunning
++	c := fake.NewSimpleClientset(testNodeWithLock(""), running, bindingTestPod("pending"))
++	if err := completeBind(context.Background(), c, testNode); err != nil {
++		t.Fatal(err)
++	}
++	assertBindPhase(t, c, "pending", bindPhaseSuccess)
++	assertBindPhase(t, c, "running", bindPhaseAllocating)
++}
++
++func TestCompleteBindOnlyForTheLockOwner(t *testing.T) {
++	// A lock names a pod that is gone: like HAMi's device plugin, do not fall
++	// back to another pod while the lock is held.
++	const lock = "2026-10-15T10:00:00Z,default,gone"
++	c := fake.NewSimpleClientset(testNodeWithLock(lock), bindingTestPod("pending"))
++	if err := completeBind(context.Background(), c, testNode); err == nil {
++		t.Error("want an error for a lock naming a missing pod")
++	}
++	if n := countPatches(c); n != 0 {
++		t.Errorf("patched %d objects", n)
++	}
++	assertBindPhase(t, c, "pending", bindPhaseAllocating)
++}
+diff --git a/internal/pkg/mock/server.go b/internal/pkg/mock/server.go
+index bd7d367..5152513 100644
+--- a/internal/pkg/mock/server.go
++++ b/internal/pkg/mock/server.go
+@@ -19,11 +19,14 @@ package mock
+ import (
+ 	"context"
+ 	"fmt"
++	"os"
+ 	"sync/atomic"
+ 	"time"
+ 
+ 	"k8s.io/klog/v2"
+ 	kubeletdevicepluginv1beta1 "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
++
++	"github.com/HAMi/mock-device-plugin/internal/pkg/util/client"
+ )
+ 
+ // Plugin is identical to DevicePluginServer interface of device plugin API.
+@@ -107,6 +110,12 @@ func (p *MockPlugin) Allocate(ctx context.Context, reqs *kubeletdevicepluginv1be
+ 		response.ContainerResponses = append(response.ContainerResponses, &car)
+ 	}
+ 
++	// HAMi's scheduler waits for the device plugin to report the bind. A failed
++	// report must not fail the allocation; HAMi's node lock expires on its own.
++	if err := completeBind(ctx, client.GetClient(), os.Getenv("NODE_NAME")); err != nil {
++		klog.Warningf("complete HAMi bind: %v", err)
++	}
++
+ 	return &response, nil
+ }
+ 
+diff --git a/k8s-mock-rbac.yaml b/k8s-mock-rbac.yaml
+index 375cc35..9daf0a6 100644
+--- a/k8s-mock-rbac.yaml
++++ b/k8s-mock-rbac.yaml
+@@ -7,6 +7,11 @@ rules:
+       - ""
+     resources: ["nodes"]
+     verbs: ["get", "update", "list", "patch"]
++  # Allocate completes HAMi's bind: it marks the pod and releases the node lock.
++  - apiGroups:
++      - ""
++    resources: ["pods"]
++    verbs: ["get", "list", "patch"]
+ ---
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRoleBinding
+-- 
+2.53.0
+
