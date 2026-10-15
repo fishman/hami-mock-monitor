@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Reza Jelveh
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: hami-mock-monitor
+description: HAMi vGPUmonitor metrics for clusters running HAMi's mock device plugin
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/fishing-agents/hami-mock-monitor
+keywords: [hami, gpu, vgpu, mock, prometheus]

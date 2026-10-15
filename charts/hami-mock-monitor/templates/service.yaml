@@ -1,0 +1,17 @@
+{{/* SPDX-FileCopyrightText: 2026 Reza Jelveh */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{/* Scrape the endpoints (one per node), not the virtual IP. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hami-mock-monitor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "hami-mock-monitor.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.service.port }}
+      targetPort: metrics

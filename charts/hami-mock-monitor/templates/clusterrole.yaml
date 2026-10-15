@@ -1,0 +1,35 @@
+{{/* SPDX-FileCopyrightText: 2026 Reza Jelveh */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{/*
+The monitor watches the pods HAMi assigned to its node (label selector
+hami.io/vgpu-node=<node>) and reads its node's device registration. Bind
+completion patches the locked pod and releases the node lock.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hami-mock-monitor.fullname" . }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"{{ if .Values.completeBinds }}, "patch"{{ end }}]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"{{ if .Values.completeBinds }}, "patch"{{ end }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hami-mock-monitor.fullname" . }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hami-mock-monitor.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hami-mock-monitor.fullname" . }}
+    namespace: {{ .Release.Namespace }}

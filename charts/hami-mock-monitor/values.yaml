@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: 2026 Reza Jelveh
+# SPDX-License-Identifier: Apache-2.0
+image:
+  repository: ghcr.io/fishing-agents/hami-mock-monitor
+  # Defaults to the chart's appVersion.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Default load source for pods without a hami-mock-monitor.io/load-source
+# annotation: vllm, seed or static.
+loadSource: seed
+# Emit HAMi's legacy CamelCase metric names alongside the hami_* ones.
+legacyMetrics: false
+# Count pods whose hami.io/bind-phase is still allocating. Needed with an
+# unpatched mock device plugin unless completeBinds is on.
+countAllocating: false
+# Mark the pod named by the node lock hami.io/bind-phase=success and release
+# the lock, as the real device plugin does. A workaround for the mock device
+# plugin; grants patch on pods and nodes.
+completeBinds: false
+# Further flags, e.g. ["--seed=42", "--vllm-max-num-seqs=8"]; see --help.
+extraArgs: []
+
+service:
+  port: 9394
+
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  labels: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+podAnnotations: {}
