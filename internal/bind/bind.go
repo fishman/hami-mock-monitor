@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,18 +25,61 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	listerscorev1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/fishing-agents/hami-mock-monitor/internal/hami"
 )
 
 type Completer struct {
-	client kubernetes.Interface
-	pods   listerscorev1.PodLister
-	node   string
+	client  kubernetes.Interface
+	pods    listerscorev1.PodLister
+	nodes   listerscorev1.NodeLister
+	node    string
+	trigger chan struct{}
 }
 
-func New(client kubernetes.Interface, pods listerscorev1.PodLister, node string) *Completer {
-	return &Completer{client: client, pods: pods, node: node}
+// New builds a completer that reads pods and its node from informer caches
+// and only writes through client.
+func New(client kubernetes.Interface, pods listerscorev1.PodLister, nodes listerscorev1.NodeLister, node string) *Completer {
+	return &Completer{client: client, pods: pods, nodes: nodes, node: node, trigger: make(chan struct{}, 1)}
+}
+
+// Watch makes every add and update on the informers (the node's pods and the
+// node itself) trigger a Reconcile.
+func (c *Completer) Watch(informers ...cache.SharedInformer) error {
+	poke := func() {
+		select {
+		case c.trigger <- struct{}{}:
+		default:
+		}
+	}
+	for _, i := range informers {
+		if _, err := i.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(any) { poke() },
+			UpdateFunc: func(any, any) { poke() },
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Run reconciles now, on every event Watch sees and every interval, which
+// only covers missed events, until ctx ends.
+func (c *Completer) Run(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		if err := c.Reconcile(ctx); err != nil {
+			slog.Warn("complete bind", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-c.trigger:
+		}
+	}
 }
 
 // Reconcile completes every open bind on this node: each pod HAMi assigned and
@@ -44,7 +88,8 @@ func New(client kubernetes.Interface, pods listerscorev1.PodLister, node string)
 // of them or any other pod of this node at success: the device plugin and this
 // completer both set success before they release the lock, so such a lock is
 // stale (a release that failed or a run that died between the two patches).
-// Reconcile is idempotent; without such a pod in the cache it makes no API call.
+// Reconcile reads only the caches and writes only what needs changing, so it
+// is idempotent and cheap to run on every event.
 func (c *Completer) Reconcile(ctx context.Context) error {
 	pods, err := c.pods.List(labels.SelectorFromSet(labels.Set{hami.AssignedNodeLabel: c.node}))
 	if err != nil {
@@ -65,9 +110,6 @@ func (c *Completer) Reconcile(ctx context.Context) error {
 		case hami.BindPhaseSuccess:
 			done[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = true
 		}
-	}
-	if len(open) == 0 && len(done) == 0 {
-		return nil
 	}
 
 	var errs []error
@@ -91,17 +133,20 @@ func (c *Completer) Reconcile(ctx context.Context) error {
 	return errors.Join(append(errs, c.releaseLock(ctx, done))...)
 }
 
-// releaseLock removes the node lock if it names a pod in done.
+// releaseLock removes the node lock if it names a pod in done. It reads the
+// node from the cache: a lock written since arrives as a node event and
+// triggers another run.
 func (c *Completer) releaseLock(ctx context.Context, done map[types.NamespacedName]bool) error {
-	node, err := c.client.CoreV1().Nodes().Get(ctx, c.node, metav1.GetOptions{})
+	node, err := c.nodes.Get(c.node)
 	if err != nil {
-		return fmt.Errorf("get node %s: %w", c.node, err)
+		return fmt.Errorf("node %s: %w", c.node, err)
 	}
 	ns, name, ok := hami.ParseNodeLock(node.Annotations[hami.NodeLockAnnotation])
 	if !ok || !done[types.NamespacedName{Namespace: ns, Name: name}] {
 		return nil
 	}
-	// The resourceVersion makes the release conditional on the lock read above.
+	// The resourceVersion makes the release conditional on the lock read
+	// above; a conflict means the cache lags and the node event retries.
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"resourceVersion": node.ResourceVersion,
 		"annotations":     map[string]any{hami.NodeLockAnnotation: nil},

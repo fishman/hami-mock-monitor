@@ -5,12 +5,15 @@ package bind
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	listerscorev1 "k8s.io/client-go/listers/core/v1"
 	k8stesting "k8s.io/client-go/testing"
@@ -45,33 +48,39 @@ func lockedNode(lock string) *corev1.Node {
 	return n
 }
 
-// setup returns a completer whose pod cache is a snapshot of pods: it does
-// not see the completer's own patches until syncCache, like a lagging informer.
-func setup(t *testing.T, n *corev1.Node, pods ...*corev1.Pod) (*Completer, *fake.Clientset, cache.Indexer) {
+// setup returns a completer whose caches are a snapshot of n and pods: it does
+// not see writes until the returned sync, like a lagging informer.
+func setup(t *testing.T, n *corev1.Node, pods ...*corev1.Pod) (*Completer, *fake.Clientset, func()) {
 	t.Helper()
 	objects := []runtime.Object{n}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	podCache := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	nodeCache := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	for _, p := range pods {
 		objects = append(objects, p)
-		if err := indexer.Add(p.DeepCopy()); err != nil {
-			t.Fatal(err)
-		}
 	}
 	client := fake.NewClientset(objects...)
-	return New(client, listerscorev1.NewPodLister(indexer), node), client, indexer
-}
-
-func syncCache(t *testing.T, client *fake.Clientset, indexer cache.Indexer) {
-	t.Helper()
-	pods, err := client.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range pods.Items {
-		if err := indexer.Update(&pods.Items[i]); err != nil {
+	sync := func() {
+		ctx := context.Background()
+		pods, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range pods.Items {
+			if err := podCache.Update(&pods.Items[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		n, err := client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := nodeCache.Update(n); err != nil {
 			t.Fatal(err)
 		}
 	}
+	sync()
+	client.ClearActions()
+	return New(client, listerscorev1.NewPodLister(podCache), listerscorev1.NewNodeLister(nodeCache), node), client, sync
 }
 
 func bindPhase(t *testing.T, client *fake.Clientset, name string) string {
@@ -105,7 +114,7 @@ func patches(client *fake.Clientset) []k8stesting.PatchAction {
 
 func TestCompletesOpenBindsAndReleasesTheirLock(t *testing.T) {
 	ctx := context.Background()
-	c, client, indexer := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,locked"),
+	c, client, sync := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,locked"),
 		pendingPod("locked", hami.BindPhaseAllocating),
 		pendingPod("unlocked", hami.BindPhaseAllocating),
 	)
@@ -126,7 +135,7 @@ func TestCompletesOpenBindsAndReleasesTheirLock(t *testing.T) {
 	if err := c.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
-	syncCache(t, client, indexer)
+	sync()
 	client.ClearActions()
 	if err := c.Reconcile(ctx); err != nil {
 		t.Fatal(err)
@@ -224,15 +233,49 @@ func TestLeavesOtherPodsAlone(t *testing.T) {
 	}
 }
 
-func TestNoCandidateNoAPICalls(t *testing.T) {
-	// Neither an open bind nor a completed one on this node.
-	failed := pendingPod("p", "failed")
+func TestNothingToDoMakesNoAPICalls(t *testing.T) {
+	// Running pods at success, a lock naming another pod: Reconcile reads only
+	// its caches.
+	done := pendingPod("p", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
+	failed := pendingPod("f", "failed")
 	elsewhere := pendingPod("q", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Spec.NodeName = "other-node" })
-	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,q"), failed, elsewhere)
+	c, client, _ := setup(t, lockedNode("2026-10-15T10:00:00Z,team-a,q"), done, failed, elsewhere)
 	if err := c.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if a := client.Actions(); len(a) != 0 {
-		t.Errorf("want no API calls without a candidate pod, got %v", a)
+		t.Errorf("want no API calls, got %v", a)
+	}
+}
+
+func TestLockWrittenToNodeIsReleasedOnTheNodeEvent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	running := pendingPod("p", hami.BindPhaseSuccess, func(p *corev1.Pod) { p.Status.Phase = corev1.PodRunning })
+	client := fake.NewClientset(lockedNode(""), running)
+	factory := informers.NewSharedInformerFactory(client, 0)
+	pods, nodes := factory.Core().V1().Pods(), factory.Core().V1().Nodes()
+	c := New(client, pods.Lister(), nodes.Lister(), node)
+	if err := c.Watch(pods.Informer(), nodes.Informer()); err != nil {
+		t.Fatal(err)
+	}
+	factory.Start(ctx.Done())
+	factory.WaitForCacheSync(ctx.Done())
+	go c.Run(ctx, time.Hour) // the interval never fires within the test
+
+	// A lock naming the completed pod is stale; the node event must release it.
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:"2026-10-15T10:00:00Z,team-a,p"}}}`, hami.NodeLockAnnotation)
+	if _, err := client.CoreV1().Nodes().Patch(ctx, node, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, held := lock(t, client); !held {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lock not released after the node event")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -132,8 +132,10 @@ UID), whether still Pending or already Running: on a mock node the container
 often starts before the monitor sees the pod. The node lock is released only
 when it names one of those pods or another pod of this node already at
 `success`, since such a lock is stale (conditional on the node's
-resourceVersion). While the node has such pods, each run reads the node once.
-It runs on every pod event and every `--complete-binds-interval` (2s), and is
+resourceVersion). Pods and the node come from informer caches (the node through
+a `metadata.name` field selector), so a run only writes what needs changing.
+It runs on every pod and node event, so a lock is released as soon as it is
+written; `--complete-binds-interval` (2s) only covers missed events. It is
 idempotent. It is a workaround until the mock device plugin does this itself;
 [upstream/mock-device-plugin](upstream/mock-device-plugin) holds the prepared
 patch. It needs `patch` on pods and nodes, which the chart grants only when it
@@ -146,8 +148,8 @@ helm install hami-mock-monitor charts/hami-mock-monitor -n kube-system
 ```
 
 The chart runs a DaemonSet (with `NODE_NAME` from the downward API), its
-ServiceAccount and ClusterRole (pods `list`/`watch`, nodes `get`; plus pods and
-nodes `patch` with `completeBinds`), a Service on 9394 and, with
+ServiceAccount and ClusterRole (pods `list`/`watch`, nodes `get`/`list`/`watch`;
+plus pods and nodes `patch` with `completeBinds`), a Service on 9394 and, with
 `serviceMonitor.enabled`, a ServiceMonitor. No `nodeSelector` by default; set
 one to run only on the mocked GPU nodes. Scrape the endpoints (one per node),
 not the Service's virtual IP. Further flags go in `extraArgs`; see

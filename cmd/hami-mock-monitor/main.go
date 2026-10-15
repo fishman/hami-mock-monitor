@@ -21,7 +21,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -50,8 +52,7 @@ func run() error {
 		legacy          = flag.Bool("legacy-metrics", false, "also emit HAMi's legacy metric names")
 		countAllocating = flag.Bool("count-allocating", false, "also count pods whose bind phase is still allocating")
 		completeBinds   = flag.Bool("complete-binds", false, "complete binds the mock device plugin leaves open (workaround, see README)")
-		bindInterval    = flag.Duration("complete-binds-interval", 2*time.Second, "how often to look for an open bind")
-		nodeInterval    = flag.Duration("node-refresh-interval", 30*time.Second, "how often to re-read the node's registered devices")
+		bindInterval    = flag.Duration("complete-binds-interval", 2*time.Second, "how often to look for an open bind besides pod and node events")
 		scrapeInterval  = flag.Duration("scrape-interval", 15*time.Second, "how often to scrape vllm pods")
 		source          = flag.String("load-source", string(load.SourceSeed), "default load source: vllm, seed or static")
 		cfg             load.Config
@@ -74,7 +75,7 @@ func run() error {
 	if *node == "" {
 		return errors.New("no node: set NODE_NAME or --node-name")
 	}
-	if *bindInterval <= 0 || *nodeInterval <= 0 || *scrapeInterval <= 0 {
+	if *bindInterval <= 0 || *scrapeInterval <= 0 {
 		return errors.New("intervals must be positive")
 	}
 	// Staleness counts from the last good sample, so a shorter window would
@@ -104,50 +105,53 @@ func run() error {
 	defer stop()
 
 	// Only the pods HAMi assigned to this node; the scheduler labels them.
-	factory := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+	podFactory := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithTweakListOptions(func(o *metav1.ListOptions) {
 		o.LabelSelector = hami.AssignedNodeLabel + "=" + *node
 	}))
-	podInformer := factory.Core().V1().Pods()
+	// Only this node: its device registration and the HAMi node lock.
+	nodeFactory := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+		o.FieldSelector = fields.OneTermEqualSelector("metadata.name", *node).String()
+	}))
+	podInformer := podFactory.Core().V1().Pods()
+	nodeInformer := nodeFactory.Core().V1().Nodes()
 	pods := podInformer.Lister()
-	// Bind completion runs on every pod event as well as on its interval, so an
-	// open bind is completed as soon as the informer sees it.
-	podEvent := make(chan struct{}, 1)
-	if *completeBinds {
-		poke := func() {
-			select {
-			case podEvent <- struct{}{}:
-			default:
+
+	col := collector.New(collector.Options{Node: *node, CountAllocating: *countAllocating, Legacy: *legacy}, pods, loads)
+	if _, err := nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) { setNodeDevices(col, obj.(*corev1.Node)) },
+		UpdateFunc: func(old, cur any) {
+			if old.(*corev1.Node).Annotations[hami.NodeRegisterAnnotation] != cur.(*corev1.Node).Annotations[hami.NodeRegisterAnnotation] {
+				setNodeDevices(col, cur.(*corev1.Node))
 			}
-		}
-		if _, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(any) { poke() },
-			UpdateFunc: func(any, any) { poke() },
-		}); err != nil {
+		},
+		DeleteFunc: func(any) { col.SetNodeDevices(nil) },
+	}); err != nil {
+		return err
+	}
+	var completer *bind.Completer
+	if *completeBinds {
+		completer = bind.New(client, pods, nodeInformer.Lister(), *node)
+		if err := completer.Watch(podInformer.Informer(), nodeInformer.Informer()); err != nil {
 			return err
 		}
 	}
-	factory.Start(ctx.Done())
-	for typ, ok := range factory.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return fmt.Errorf("sync %v cache", typ)
+	for _, f := range []informers.SharedInformerFactory{podFactory, nodeFactory} {
+		f.Start(ctx.Done())
+		for typ, ok := range f.WaitForCacheSync(ctx.Done()) {
+			if !ok {
+				return fmt.Errorf("sync %v cache", typ)
+			}
 		}
 	}
 
-	col := collector.New(collector.Options{Node: *node, CountAllocating: *countAllocating, Legacy: *legacy}, pods, loads)
 	reg := prometheus.NewRegistry()
 	if err := collector.Register(reg, col); err != nil {
 		return err
 	}
 
-	go every(ctx, *nodeInterval, nil, func() { refreshNodeDevices(ctx, client, *node, col) })
-	go every(ctx, *scrapeInterval, nil, func() { loads.Refresh(ctx, col.Pods(), time.Now()) })
-	if *completeBinds {
-		completer := bind.New(client, pods, *node)
-		go every(ctx, *bindInterval, podEvent, func() {
-			if err := completer.Reconcile(ctx); err != nil {
-				slog.Warn("complete bind", "err", err)
-			}
-		})
+	go every(ctx, *scrapeInterval, func() { loads.Refresh(ctx, col.Pods(), time.Now()) })
+	if completer != nil {
+		go completer.Run(ctx, *bindInterval)
 	}
 
 	mux := http.NewServeMux()
@@ -172,8 +176,8 @@ func run() error {
 	return server.Shutdown(shutdown)
 }
 
-// every runs f now, then on each tick and each trigger until ctx ends.
-func every(ctx context.Context, d time.Duration, trigger <-chan struct{}, f func()) {
+// every runs f now, then on each tick until ctx ends.
+func every(ctx context.Context, d time.Duration, f func()) {
 	t := time.NewTicker(d)
 	defer t.Stop()
 	for {
@@ -182,28 +186,22 @@ func every(ctx context.Context, d time.Duration, trigger <-chan struct{}, f func
 		case <-ctx.Done():
 			return
 		case <-t.C:
-		case <-trigger:
 		}
 	}
 }
 
-// refreshNodeDevices keeps the last good device list when the node cannot be
-// read, and drops it when the registration is gone or unreadable.
-func refreshNodeDevices(ctx context.Context, client kubernetes.Interface, name string, col *collector.Collector) {
-	n, err := client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		slog.Warn("get node", "node", name, "err", err)
-		return
-	}
+// setNodeDevices reads the node's device registration; without a readable
+// one the host series are off.
+func setNodeDevices(col *collector.Collector, n *corev1.Node) {
 	v, ok := n.Annotations[hami.NodeRegisterAnnotation]
 	if !ok {
-		slog.Warn("node has no device registration, host series off", "node", name, "annotation", hami.NodeRegisterAnnotation)
+		slog.Warn("node has no device registration, host series off", "node", n.Name, "annotation", hami.NodeRegisterAnnotation)
 		col.SetNodeDevices(nil)
 		return
 	}
 	devices, err := hami.DecodeNodeDevices(v)
 	if err != nil {
-		slog.Warn("undecodable device registration, host series off", "node", name, "err", err)
+		slog.Warn("undecodable device registration, host series off", "node", n.Name, "err", err)
 	}
 	col.SetNodeDevices(devices)
 }

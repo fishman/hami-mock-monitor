@@ -2,8 +2,9 @@
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{/*
 The monitor watches the pods HAMi assigned to its node (label selector
-hami.io/vgpu-node=<node>) and reads its node's device registration. Bind
-completion patches the locked pod and releases the node lock.
+hami.io/vgpu-node=<node>) and its own node (field selector metadata.name) for
+the device registration and the node lock. Bind completion patches pods still
+allocating and releases a stale node lock.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -17,7 +18,7 @@ rules:
     verbs: ["list", "watch"{{ if .Values.completeBinds }}, "patch"{{ end }}]
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get"{{ if .Values.completeBinds }}, "patch"{{ end }}]
+    verbs: ["get", "list", "watch"{{ if .Values.completeBinds }}, "patch"{{ end }}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
