@@ -164,7 +164,7 @@ func run() error {
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 15 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
-	slog.Info("serving", "addr", listener.Addr().String(), "node", *node, "load-source", cfg.Source)
+	slog.Info("serving", "addr", listener.Addr(), "node", *node, "load-source", cfg.Source)
 
 	select {
 	case err := <-serveErr:

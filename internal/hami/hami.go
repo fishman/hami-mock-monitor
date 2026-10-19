@@ -114,13 +114,14 @@ func DecodeNodeDevices(s string) ([]NodeDevice, error) {
 	for _, d := range raw {
 		seen[d.Index] = true
 	}
+	distinct := len(seen) == len(raw)
 	devices := make([]NodeDevice, len(raw))
 	for i, d := range raw {
 		if d.ID == "" {
 			return nil, fmt.Errorf("decode %s: device %d has no id", NodeRegisterAnnotation, i)
 		}
 		index := d.Index
-		if len(seen) != len(raw) {
+		if !distinct {
 			index = i
 		}
 		devices[i] = NodeDevice{ID: d.ID, Index: index, MemoryMiB: d.Devmem, Type: normalizeModel(d.Type)}

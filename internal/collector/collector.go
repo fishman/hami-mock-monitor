@@ -9,6 +9,7 @@ package collector
 import (
 	"errors"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -84,23 +85,18 @@ func (c *Collector) Pods() []*corev1.Pod {
 		slog.Error("list pods", "err", err)
 		return nil
 	}
-	counted := pods[:0:0]
-	for _, p := range pods {
+	return slices.DeleteFunc(pods, func(p *corev1.Pod) bool {
 		if p.Spec.NodeName != c.opts.Node || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			continue
+			return true
 		}
 		switch p.Annotations[hami.BindPhaseAnnotation] {
 		case hami.BindPhaseSuccess:
+			return false
 		case hami.BindPhaseAllocating:
-			if !c.opts.CountAllocating {
-				continue
-			}
-		default:
-			continue
+			return !c.opts.CountAllocating
 		}
-		counted = append(counted, p)
-	}
-	return counted
+		return true
+	})
 }
 
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
@@ -123,7 +119,7 @@ type deviceUsage struct {
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	now := c.now()
-	usage := map[string]*deviceUsage{}
+	usage := map[string]deviceUsage{}
 	for _, pod := range c.Pods() {
 		allocation, err := hami.DecodePodDevices(pod.Annotations[hami.DevicesAllocatedAnnotation])
 		if err != nil {
@@ -140,14 +136,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 				continue
 			}
 			for vdev, d := range devices {
-				u := usage[d.UUID]
-				if u == nil {
-					u = &deviceUsage{}
-					usage[d.UUID] = u
-				}
 				l, err := c.loads.Load(pod, ctr, d.UUID, now)
 				if err != nil {
-					u.unknown = true
+					usage[d.UUID] = deviceUsage{unknown: true}
 					if !errors.Is(err, load.ErrNoSample) {
 						slog.Warn("skip container with invalid load configuration", "pod", pod.Namespace+"/"+pod.Name, "container", ctr, "err", err)
 					}
@@ -162,8 +153,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 					cores = 100
 				}
 				utilization := l.ComputeFraction * cores
-				u.utilization += utilization
-				u.memory += used
+				if u := usage[d.UUID]; !u.unknown {
+					usage[d.UUID] = deviceUsage{utilization: u.utilization + utilization, memory: u.memory + used}
+				}
 
 				lv := []string{pod.Namespace, pod.Name, ctr, strconv.Itoa(vdev), d.UUID}
 				gauge(ch, vgpuMemoryUsed, used, lv...)
@@ -187,9 +179,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, d := range *devices {
 		u := usage[d.ID]
-		if u == nil {
-			u = &deviceUsage{}
-		}
 		if u.unknown {
 			continue
 		}

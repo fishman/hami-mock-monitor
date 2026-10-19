@@ -321,18 +321,18 @@ func (r *Resolver) metricsURL(pod *corev1.Pod) (string, error) {
 }
 
 func namedPort(pod *corev1.Pod) int {
-	var http int32
+	var fallback int32
 	for _, c := range pod.Spec.Containers {
 		for _, p := range c.Ports {
 			switch {
 			case p.Name == "metrics":
 				return int(p.ContainerPort)
-			case p.Name == "http" && http == 0:
-				http = p.ContainerPort
+			case p.Name == "http" && fallback == 0:
+				fallback = p.ContainerPort
 			}
 		}
 	}
-	return int(http)
+	return int(fallback)
 }
 
 func annotationFloat(pod *corev1.Pod, key string, def, lo, hi float64) (float64, error) {
