@@ -32,6 +32,9 @@ service:
 serviceMonitor:
   enabled: false
   interval: 15s
+  # Keep the series' own namespace, pod and container labels (as HAMi's
+  # vGPUmonitor sets them) instead of renaming them exported_*.
+  honorLabels: true
   labels: {}
 
 smi:

@@ -261,7 +261,10 @@ plus pods and nodes `patch` with `completeBinds`), a Service on 9394 with
 ServiceMonitor; with `smi.inject.enabled` also the webhook, its Service and
 certificate. No `nodeSelector` by default; set one to run only on the mocked
 GPU nodes. Scrape the endpoints (one per node), not the Service's virtual IP.
-Further flags go in `extraArgs`; see `hami-mock-monitor --help`.
+The ServiceMonitor sets `honorLabels: true` (`serviceMonitor.honorLabels`):
+`namespace`, `pod` and `container` are series labels, as on HAMi's
+vGPUmonitor, and would otherwise be renamed `exported_*`. Further flags go in
+`extraArgs`; see `hami-mock-monitor --help`.
 
 ## Quickstart: kind, HAMi, mock device plugin, llm-d-inference-sim
 
