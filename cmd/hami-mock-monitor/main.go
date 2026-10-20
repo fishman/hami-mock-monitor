@@ -101,6 +101,12 @@ func run() error {
 	flag.Float64Var(&cfg.VLLMMemoryFraction, "vllm-memory-fraction", 0.9, "vllm source: share of the memory limit vLLM pre-allocates (its gpu-memory-utilization), 0-1")
 	flag.DurationVar(&cfg.ScrapeTimeout, "scrape-timeout", 5*time.Second, "vllm source: scrape timeout")
 	flag.DurationVar(&cfg.StaleAfter, "stale-after", time.Minute, "vllm source: how long a last value outlives failing scrapes")
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), "Usage: hami-mock-monitor [flags]\n"+
+			"       hami-mock-monitor smi [--node NODE | --monitor-url URL] [nvidia-smi options]\n"+
+			"       hami-mock-monitor install-smi DEST\n\nFlags:\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	cfg.Source = load.Source(*source)
 
