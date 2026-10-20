@@ -54,6 +54,8 @@ Every series carries `zone="vGPU"`, as HAMi's monitor does.
 | `hami_container_device_utilization_ratio` | same | SM utilization in percent of the whole device: load x allocated cores (cores 0 = the whole device, 100) |
 | `hami_host_gpu_utilization_ratio` | `node, device_index, device_uuid, device_type` | sum over the device's containers, capped at 100 |
 | `hami_host_gpu_memory_used_bytes` | same | sum over the device's containers, capped at the device memory |
+| `hami_host_gpu_temperature_celsius` | same | derived from the device's utilization: 30 idle to 80 at 100, whole degrees |
+| `hami_host_gpu_power_usage_watts` | same | derived from the device's utilization: 60 idle to the 400 W cap at 100 |
 
 Every load source yields a share of the container's allocation, 0-1. The
 utilization multiplies it by the allocated cores from
@@ -64,6 +66,8 @@ container's allocation.
 `device_type` is the registered model, prefixed `NVIDIA-` when it lacks the
 prefix, as HAMi labels it. `device_index` is the registered `index`, or the
 list position when the registration leaves indices out.
+Temperature and power use the derivation the [mock nvidia-smi](#mock-nvidia-smi)
+shows, so dashboards and `nvidia-smi` agree.
 
 With `--legacy-metrics` the legacy names are emitted as well:
 `HostGPUMemoryUsage`, `HostCoreUtilization`,

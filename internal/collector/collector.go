@@ -30,6 +30,8 @@ var (
 
 	hostMemoryUsed  = prometheus.NewDesc("hami_host_gpu_memory_used_bytes", "GPU device memory usage in bytes", hostLabels, nil)
 	hostUtilization = prometheus.NewDesc("hami_host_gpu_utilization_ratio", "GPU core utilization ratio (0-100)", hostLabels, nil)
+	hostTemperature = prometheus.NewDesc("hami_host_gpu_temperature_celsius", "GPU temperature in degrees Celsius", hostLabels, nil)
+	hostPower       = prometheus.NewDesc("hami_host_gpu_power_usage_watts", "GPU power draw in watts", hostLabels, nil)
 	vgpuMemoryUsed  = prometheus.NewDesc("hami_vgpu_memory_used_bytes", "vGPU device memory usage in bytes", containerLabels, nil)
 	vgpuMemoryLimit = prometheus.NewDesc("hami_vgpu_memory_limit_bytes", "vGPU device memory limit in bytes", containerLabels, nil)
 	ctrMemory       = prometheus.NewDesc("hami_container_device_memory_bytes", "Container device memory usage in bytes", containerLabels, nil)
@@ -99,7 +101,7 @@ func (c *Collector) Pods() []*corev1.Pod {
 }
 
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{hostMemoryUsed, hostUtilization, vgpuMemoryUsed, vgpuMemoryLimit, ctrMemory, ctrUtilization} {
+	for _, d := range []*prometheus.Desc{hostMemoryUsed, hostUtilization, hostTemperature, hostPower, vgpuMemoryUsed, vgpuMemoryLimit, ctrMemory, ctrUtilization} {
 		ch <- d
 	}
 	if c.opts.Legacy {
@@ -136,6 +138,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		lv := []string{s.Node, strconv.Itoa(d.Index), d.UUID, d.Type}
 		gauge(ch, hostMemoryUsed, d.UsedBytes, lv...)
 		gauge(ch, hostUtilization, d.Utilization, lv...)
+		gauge(ch, hostTemperature, float64(d.Temperature()), lv...)
+		gauge(ch, hostPower, d.Power(), lv...)
 		if c.opts.Legacy {
 			gauge(ch, legacyHostMemoryUsed, d.UsedBytes, lv...)
 			gauge(ch, legacyHostUtilization, d.Utilization, lv...)

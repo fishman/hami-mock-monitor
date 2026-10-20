@@ -3,8 +3,9 @@
 
 // Package smi prints a monitor snapshot the way nvidia-smi prints a node's
 // GPUs: the default table (the layout of driver 580) and the CSV of
-// --query-gpu and --query-compute-apps. The header says MOCK. Temperature,
-// power and performance state are derived from utilization.
+// --query-gpu and --query-compute-apps. The header says MOCK. Temperature and
+// power are the collector's derivation from utilization, so the table and the
+// metrics agree; the performance state follows utilization too.
 package smi
 
 import (
@@ -29,10 +30,6 @@ const Version = "580.105.08"
 const (
 	cudaVersion = "13.0"
 	mib         = 1 << 20
-	idleTemp    = 30.0
-	busyTemp    = 80.0
-	idlePower   = 60.0
-	powerCap    = 400.0
 	// pidMax is Linux's PID_MAX_LIMIT on 64-bit.
 	pidMax = 1 << 22
 	na     = "N/A"
@@ -213,12 +210,12 @@ var (
 			return known(d, func() string { return strconv.Itoa(utilization(d)) })
 		}},
 		"temperature.gpu": {header: "temperature.gpu", value: func(d collector.Device) string {
-			return known(d, func() string { return strconv.Itoa(temperature(d)) })
+			return known(d, func() string { return strconv.Itoa(d.Temperature()) })
 		}},
 		"power.draw": {header: "power.draw [W]", unit: "W", value: func(d collector.Device) string {
-			return known(d, func() string { return strconv.FormatFloat(power(d), 'f', 2, 64) })
+			return known(d, func() string { return strconv.FormatFloat(d.Power(), 'f', 2, 64) })
 		}},
-		"power.limit": {header: "power.limit [W]", unit: "W", value: func(collector.Device) string { return strconv.FormatFloat(powerCap, 'f', 2, 64) }},
+		"power.limit": {header: "power.limit [W]", unit: "W", value: func(collector.Device) string { return strconv.FormatFloat(collector.PowerCap, 'f', 2, 64) }},
 	}
 
 	usedMemory = field[collector.Process]{header: "used_gpu_memory [MiB]", unit: "MiB", value: func(p collector.Process) string {
@@ -268,17 +265,17 @@ func Table(s collector.Snapshot, now time.Time) string {
 		temp, perf, pwr, used, util := na, na, na, na, na
 		if !d.Unknown {
 			u := utilization(d)
-			temp = strconv.Itoa(temperature(d)) + "C"
+			temp = strconv.Itoa(d.Temperature()) + "C"
 			perf = "P8"
 			if u > 0 {
 				perf = "P0"
 			}
-			pwr = strconv.Itoa(int(math.Round(power(d)))) + "W"
+			pwr = strconv.Itoa(int(math.Round(d.Power()))) + "W"
 			used = strconv.FormatInt(usedMiB(d.UsedBytes), 10) + "MiB"
 			util = strconv.Itoa(u) + "%"
 		}
 		fmt.Fprintf(&b, "|%4d  %-31s%-3s |   %-16s %3s |%21s |\n", d.Index, deviceName(d.Type), "On", busID(d.Index), "Off", na)
-		fmt.Fprintf(&b, "| %3s   %3s%6s%16s / %4.0fW |%11s / %9s |%8s%13s |\n", na, temp, perf, pwr, powerCap,
+		fmt.Fprintf(&b, "| %3s   %3s%6s%16s / %4.0fW |%11s / %9s |%8s%13s |\n", na, temp, perf, pwr, collector.PowerCap,
 			used, strconv.FormatInt(d.MemoryBytes/mib, 10)+"MiB", util, "Default")
 		fmt.Fprintf(&b, "|%41s|%24s|%21s |\n", "", "", na)
 		b.WriteString(gpuLine)
@@ -315,12 +312,6 @@ func Table(s collector.Snapshot, now time.Time) string {
 }
 
 func utilization(d collector.Device) int { return int(math.Round(d.Utilization)) }
-
-func temperature(d collector.Device) int {
-	return int(math.Round(idleTemp + (busyTemp-idleTemp)*d.Utilization/100))
-}
-
-func power(d collector.Device) float64 { return idlePower + (powerCap-idlePower)*d.Utilization/100 }
 
 func usedMiB(b float64) int64 { return int64(b / mib) }
 

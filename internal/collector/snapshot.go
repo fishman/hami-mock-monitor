@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 
@@ -40,6 +41,27 @@ type Device struct {
 	// Unknown marks a device with a container whose load is unknown: its
 	// sum would understate, so usage is left out.
 	Unknown bool `json:"unknown,omitempty"`
+}
+
+// PowerCap is every mock device's power limit in watts.
+const PowerCap = 400.0
+
+const (
+	idleTemperature = 30.0
+	busyTemperature = 80.0
+	idlePower       = 60.0
+)
+
+// Temperature is derived from utilization, 30 C idle to 80 C at full load,
+// in whole degrees as NVML reports it.
+func (d Device) Temperature() int {
+	return int(math.Round(idleTemperature + (busyTemperature-idleTemperature)*d.Utilization/100))
+}
+
+// Power is derived from utilization, 60 W idle to PowerCap at full load, in
+// watts to the milliwatt as NVML reports it.
+func (d Device) Power() float64 {
+	return math.Round((idlePower+(PowerCap-idlePower)*d.Utilization/100)*1000) / 1000
 }
 
 // Process is one device of one allocated container.

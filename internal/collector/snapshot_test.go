@@ -75,3 +75,21 @@ func TestSMINodeAndContainerSlice(t *testing.T) {
 		}
 	}
 }
+
+// The table, the query CSV and the host series all read these.
+func TestTemperatureAndPowerFollowUtilization(t *testing.T) {
+	for _, tc := range []struct {
+		utilization float64
+		temp        int
+		power       float64
+	}{
+		{0, 30, 60},
+		{64.8, 62, 280.32},
+		{100, 80, PowerCap},
+	} {
+		d := Device{Utilization: tc.utilization}
+		if d.Temperature() != tc.temp || d.Power() != tc.power {
+			t.Errorf("utilization %v: %d C %v W, want %d C %v W", tc.utilization, d.Temperature(), d.Power(), tc.temp, tc.power)
+		}
+	}
+}

@@ -125,9 +125,13 @@ func TestContractNamesAndLabels(t *testing.T) {
 	for i, uuid := range []string{"GPU-0", "GPU-1", "GPU-2"} {
 		want[hostKey("hami_host_gpu_memory_used_bytes", i, uuid)] = 0
 		want[hostKey("hami_host_gpu_utilization_ratio", i, uuid)] = 0
+		want[hostKey("hami_host_gpu_temperature_celsius", i, uuid)] = 30
+		want[hostKey("hami_host_gpu_power_usage_watts", i, uuid)] = 60
 	}
 	want[hostKey("hami_host_gpu_memory_used_bytes", 0, "GPU-0")] = 256 * mib
 	want[hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0")] = 15
+	want[hostKey("hami_host_gpu_temperature_celsius", 0, "GPU-0")] = 38 // 37.5 rounded
+	want[hostKey("hami_host_gpu_power_usage_watts", 0, "GPU-0")] = 111
 	assertSeries(t, got, want)
 }
 
@@ -188,6 +192,8 @@ func TestUtilizationIsShareOfDeviceAndHostCaps(t *testing.T) {
 		hostKey("hami_host_gpu_utilization_ratio", 0, "GPU-0"):                     100,
 		hostKey("hami_host_gpu_memory_used_bytes", 0, "GPU-0"):                     1024 * mib,
 		hostKey("hami_host_gpu_utilization_ratio", 1, "GPU-1"):                     35,
+		hostKey("hami_host_gpu_temperature_celsius", 0, "GPU-0"):                   80,
+		hostKey("hami_host_gpu_power_usage_watts", 0, "GPU-0"):                     400,
 		hostKey("hami_host_gpu_memory_used_bytes", 1, "GPU-1"):                     384 * mib,
 		hostKey("hami_host_gpu_utilization_ratio", 2, "GPU-2"):                     0,
 	} {
