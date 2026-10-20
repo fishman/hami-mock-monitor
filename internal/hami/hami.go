@@ -38,7 +38,9 @@ const (
 
 // ContainerDevice is one device of one container's allocation.
 type ContainerDevice struct {
-	UUID      string
+	UUID string
+	// Type is the device type HAMi allocated by, e.g. "NVIDIA".
+	Type      string
 	MemoryMiB int64
 	Cores     int64
 }
@@ -66,7 +68,7 @@ func DecodePodDevices(s string) ([][]ContainerDevice, error) {
 			if err != nil || cores < 0 {
 				return nil, fmt.Errorf("device %q: invalid cores %q", dev, f[3])
 			}
-			ctr = append(ctr, ContainerDevice{UUID: f[0], MemoryMiB: mem, Cores: cores})
+			ctr = append(ctr, ContainerDevice{UUID: f[0], Type: f[1], MemoryMiB: mem, Cores: cores})
 		}
 		pod = append(pod, ctr)
 	}

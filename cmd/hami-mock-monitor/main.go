@@ -156,6 +156,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/smi", col.ServeSMI)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	listener, err := net.Listen("tcp", *addr)
 	if err != nil {

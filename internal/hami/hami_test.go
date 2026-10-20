@@ -20,8 +20,8 @@ func TestDecodePodDevicesMultiContainerMultiDevice(t *testing.T) {
 	}
 	want := [][]ContainerDevice{
 		nil,
-		{{UUID: "GPU-a", MemoryMiB: 40960, Cores: 30}, {UUID: "GPU-b", MemoryMiB: 20480}},
-		{{UUID: "GPU-c", MemoryMiB: 1024, Cores: 10}},
+		{{UUID: "GPU-a", Type: "NVIDIA", MemoryMiB: 40960, Cores: 30}, {UUID: "GPU-b", Type: "NVIDIA", MemoryMiB: 20480}},
+		{{UUID: "GPU-c", Type: "NVIDIA", MemoryMiB: 1024, Cores: 10}},
 		nil,
 	}
 	if !reflect.DeepEqual(got, want) {

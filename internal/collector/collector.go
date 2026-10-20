@@ -7,7 +7,6 @@
 package collector
 
 import (
-	"errors"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -110,86 +109,36 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	}
 }
 
-type deviceUsage struct {
-	utilization, memory float64
-	// unknown marks a device with a container whose load is unknown: its sum
-	// would understate, so the host series are left out.
-	unknown bool
-}
-
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	now := c.now()
-	usage := map[string]deviceUsage{}
-	for _, pod := range c.Pods() {
-		allocation, err := hami.DecodePodDevices(pod.Annotations[hami.DevicesAllocatedAnnotation])
-		if err != nil {
-			slog.Warn("skip pod with undecodable allocation", "pod", pod.Namespace+"/"+pod.Name, "err", err)
+	s := c.Snapshot()
+	for _, p := range s.Processes {
+		if p.Unknown {
 			continue
 		}
-		for i, devices := range allocation {
-			if len(devices) == 0 {
-				continue
-			}
-			ctr, ok := hami.ContainerName(pod, i)
-			if !ok {
-				slog.Warn("allocation names a missing container", "pod", pod.Namespace+"/"+pod.Name, "index", i)
-				continue
-			}
-			for vdev, d := range devices {
-				l, err := c.loads.Load(pod, ctr, d.UUID, now)
-				if err != nil {
-					usage[d.UUID] = deviceUsage{unknown: true}
-					if !errors.Is(err, load.ErrNoSample) {
-						slog.Warn("skip container with invalid load configuration", "pod", pod.Namespace+"/"+pod.Name, "container", ctr, "err", err)
-					}
-					continue
-				}
-				limit := float64(d.MemoryMiB) * mib
-				used := l.MemoryFraction * limit
-				// Like HAMi's monitor, utilization is in percent of the whole
-				// device; cores 0 means the allocation may use all of it.
-				cores := float64(d.Cores)
-				if cores == 0 || cores > 100 {
-					cores = 100
-				}
-				utilization := l.ComputeFraction * cores
-				if u := usage[d.UUID]; !u.unknown {
-					usage[d.UUID] = deviceUsage{utilization: u.utilization + utilization, memory: u.memory + used}
-				}
-
-				lv := []string{pod.Namespace, pod.Name, ctr, strconv.Itoa(vdev), d.UUID}
-				gauge(ch, vgpuMemoryUsed, used, lv...)
-				gauge(ch, vgpuMemoryLimit, limit, lv...)
-				gauge(ch, ctrMemory, used, lv...)
-				gauge(ch, ctrUtilization, utilization, lv...)
-				if c.opts.Legacy {
-					gauge(ch, legacyVGPUMemoryUsed, used, lv...)
-					gauge(ch, legacyVGPUMemoryLimit, limit, lv...)
-					// context, module and data sizes are 0, so all of it is offset.
-					gauge(ch, legacyCtrMemory, used, append(lv, "0", "0", "0", strconv.FormatFloat(used, 'f', 0, 64))...)
-					gauge(ch, legacyCtrUtilization, utilization, lv...)
-				}
-			}
-		}
-	}
-
-	devices := c.devices.Load()
-	if devices == nil {
-		return
-	}
-	for _, d := range *devices {
-		u := usage[d.ID]
-		if u.unknown {
-			continue
-		}
-		used := min(u.memory, float64(d.MemoryMiB)*mib)
-		utilization := min(u.utilization, 100)
-		lv := []string{c.opts.Node, strconv.Itoa(d.Index), d.ID, d.Type}
-		gauge(ch, hostMemoryUsed, used, lv...)
-		gauge(ch, hostUtilization, utilization, lv...)
+		limit := float64(p.LimitBytes)
+		lv := []string{p.Namespace, p.Pod, p.Container, strconv.Itoa(p.VDevice), p.DeviceUUID}
+		gauge(ch, vgpuMemoryUsed, p.UsedBytes, lv...)
+		gauge(ch, vgpuMemoryLimit, limit, lv...)
+		gauge(ch, ctrMemory, p.UsedBytes, lv...)
+		gauge(ch, ctrUtilization, p.Utilization, lv...)
 		if c.opts.Legacy {
-			gauge(ch, legacyHostMemoryUsed, used, lv...)
-			gauge(ch, legacyHostUtilization, utilization, lv...)
+			gauge(ch, legacyVGPUMemoryUsed, p.UsedBytes, lv...)
+			gauge(ch, legacyVGPUMemoryLimit, limit, lv...)
+			// context, module and data sizes are 0, so all of it is offset.
+			gauge(ch, legacyCtrMemory, p.UsedBytes, append(lv, "0", "0", "0", strconv.FormatFloat(p.UsedBytes, 'f', 0, 64))...)
+			gauge(ch, legacyCtrUtilization, p.Utilization, lv...)
+		}
+	}
+	for _, d := range s.Devices {
+		if d.Unknown {
+			continue
+		}
+		lv := []string{s.Node, strconv.Itoa(d.Index), d.UUID, d.Type}
+		gauge(ch, hostMemoryUsed, d.UsedBytes, lv...)
+		gauge(ch, hostUtilization, d.Utilization, lv...)
+		if c.opts.Legacy {
+			gauge(ch, legacyHostMemoryUsed, d.UsedBytes, lv...)
+			gauge(ch, legacyHostUtilization, d.Utilization, lv...)
 		}
 	}
 }
