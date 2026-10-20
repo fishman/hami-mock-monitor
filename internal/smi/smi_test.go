@@ -82,10 +82,10 @@ func TestArgumentErrorsBeforeFetch(t *testing.T) {
 	}{
 		{Options{QueryGPU: "index,clocks.sm", Format: "csv"}, `Field "clocks.sm" is not a valid field to query.`},
 		{Options{QueryApps: "pid,gpu_uuid", Format: "csv"}, `Field "gpu_uuid" is not a valid field to query.`},
-		{Options{QueryGPU: "index"}, string(errCombination)},
-		{Options{QueryGPU: "index", Format: "json"}, string(errCombination)},
-		{Options{QueryGPU: "index", QueryApps: "pid", Format: "csv"}, string(errCombination)},
-		{Options{Format: "csv"}, string(errCombination)},
+		{Options{QueryGPU: "index"}, string(ErrCombination)},
+		{Options{QueryGPU: "index", Format: "json"}, string(ErrCombination)},
+		{Options{QueryGPU: "index", QueryApps: "pid", Format: "csv"}, string(ErrCombination)},
+		{Options{Format: "csv"}, string(ErrCombination)},
 	} {
 		err := tc.opts.Run(&bytes.Buffer{}, now, func() (collector.Snapshot, error) {
 			t.Fatal("fetched despite invalid arguments")

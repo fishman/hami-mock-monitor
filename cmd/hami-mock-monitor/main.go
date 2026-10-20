@@ -4,6 +4,10 @@
 // Command hami-mock-monitor stands in for HAMi's vGPUmonitor on nodes whose
 // devices come from HAMi's mock device plugin. Run it as a DaemonSet with
 // NODE_NAME set; it serves the vGPUmonitor metrics on :9394/metrics.
+//
+// "hami-mock-monitor smi" prints the node's mock GPUs as nvidia-smi does;
+// called as nvidia-smi it prints the slice of the container it runs in;
+// "hami-mock-monitor install-smi DEST" copies itself to DEST for that.
 package main
 
 import (
@@ -16,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -38,6 +43,25 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if filepath.Base(os.Args[0]) == shimName {
+		os.Exit(runSMI(os.Args[1:], false, os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "smi":
+			os.Exit(runSMI(os.Args[2:], true, os.Stdout, os.Stderr))
+		case "install-smi":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: hami-mock-monitor install-smi DEST")
+				os.Exit(2)
+			}
+			if err := installSMI(os.Args[2]); err != nil {
+				slog.Error("install nvidia-smi", "err", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	if err := run(); err != nil {
 		slog.Error("exit", "err", err)
 		os.Exit(1)

@@ -48,7 +48,8 @@ type ArgError string
 
 func (e ArgError) Error() string { return string(e) }
 
-const errCombination = ArgError("Invalid combination of input arguments. Please run 'nvidia-smi -h' for help.")
+// ErrCombination is nvidia-smi's answer to arguments it cannot use.
+const ErrCombination = ArgError("Invalid combination of input arguments. Please run 'nvidia-smi -h' for help.")
 
 // Options are the nvidia-smi arguments both views accept.
 type Options struct {
@@ -75,12 +76,13 @@ Usage: nvidia-smi [OPTION1 [ARG1]] [OPTION2 [ARG2]] ...
 
     -h,   --help                Print usage information and exit.
 %s
-    --query-gpu=                Information about GPU, a comma separated list of:
-                                %s
+    --query-gpu=                Information about GPU, a comma separated list of: index, name,
+                                uuid, pci.bus_id, memory.total, memory.used, memory.free,
+                                utilization.gpu, temperature.gpu, power.draw, power.limit
     --query-compute-apps=       List of active compute processes, a comma separated list of:
-                                %s
+                                pid, process_name, used_memory
     --format=                   csv[,noheader][,nounits]
-`, Version, extra, strings.Join(gpuFieldNames, ", "), strings.Join(appFieldNames, ", "))
+`, Version, extra)
 }
 
 // Run checks the arguments, then writes the table or the CSV for the
@@ -104,12 +106,12 @@ func (o Options) Run(w io.Writer, now time.Time, fetch func() (collector.Snapsho
 func (o Options) renderer(now time.Time) (func(collector.Snapshot) string, error) {
 	if o.QueryGPU == "" && o.QueryApps == "" {
 		if o.Format != "" {
-			return nil, errCombination
+			return nil, ErrCombination
 		}
 		return func(s collector.Snapshot) string { return Table(s, now) }, nil
 	}
 	if o.QueryGPU != "" && o.QueryApps != "" {
-		return nil, errCombination
+		return nil, ErrCombination
 	}
 	header, units, err := parseFormat(o.Format)
 	if err != nil {
@@ -143,11 +145,11 @@ func parseFormat(f string) (header, units bool, err error) {
 		case "nounits":
 			units = false
 		default:
-			return false, false, errCombination
+			return false, false, ErrCombination
 		}
 	}
 	if !csv {
-		return false, false, errCombination
+		return false, false, ErrCombination
 	}
 	return header, units, nil
 }
@@ -195,8 +197,6 @@ func writeCSV[T any](fields []field[T], rows []T, header, units bool) string {
 }
 
 var (
-	gpuFieldNames = []string{"index", "name", "uuid", "pci.bus_id", "memory.total", "memory.used", "memory.free",
-		"utilization.gpu", "temperature.gpu", "power.draw", "power.limit"}
 	gpuFields = map[string]field[collector.Device]{
 		"index":        {header: "index", value: func(d collector.Device) string { return strconv.Itoa(d.Index) }},
 		"name":         {header: "name", value: func(d collector.Device) string { return d.Type }},
@@ -221,8 +221,7 @@ var (
 		"power.limit": {header: "power.limit [W]", unit: "W", value: func(collector.Device) string { return strconv.FormatFloat(powerCap, 'f', 2, 64) }},
 	}
 
-	appFieldNames = []string{"pid", "process_name", "used_memory"}
-	usedMemory    = field[collector.Process]{header: "used_gpu_memory [MiB]", unit: "MiB", value: func(p collector.Process) string {
+	usedMemory = field[collector.Process]{header: "used_gpu_memory [MiB]", unit: "MiB", value: func(p collector.Process) string {
 		if p.Unknown {
 			return csvNA
 		}
