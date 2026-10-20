@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +41,7 @@ import (
 	"github.com/fishing-agents/hami-mock-monitor/internal/collector"
 	"github.com/fishing-agents/hami-mock-monitor/internal/hami"
 	"github.com/fishing-agents/hami-mock-monitor/internal/load"
+	"github.com/fishing-agents/hami-mock-monitor/internal/webhook"
 )
 
 func main() {
@@ -79,6 +82,11 @@ func run() error {
 		bindInterval    = flag.Duration("complete-binds-interval", 2*time.Second, "how often to look for an open bind besides pod and node events")
 		scrapeInterval  = flag.Duration("scrape-interval", 15*time.Second, "how often to scrape vllm pods")
 		source          = flag.String("load-source", string(load.SourceSeed), "default load source: vllm, seed or static")
+		webhookAddr     = flag.String("webhook-bind-address", "", "address to serve the nvidia-smi injection webhook on, HTTPS at /inject; off when empty")
+		webhookCertDir  = flag.String("webhook-cert-dir", "/tls", "webhook: directory with tls.crt and tls.key, read on every handshake")
+		smiImage        = flag.String("smi-image", "", "webhook: image of the init container copying nvidia-smi, this monitor's image")
+		smiURL          = flag.String("smi-url", "", "webhook: HAMI_MOCK_SMI_URL of injected containers, a Service with internalTrafficPolicy Local")
+		smiResources    = flag.String("smi-resources", joinResources(webhook.DefaultResources), "webhook: resource limits that mark a new pod as HAMi-allocated, comma separated")
 		cfg             load.Config
 	)
 	flag.Int64Var(&cfg.Seed, "seed", 0, "seed source: seed of the curves")
@@ -106,6 +114,9 @@ func run() error {
 	// drop vllm series between two successful scrapes.
 	if cfg.StaleAfter < *scrapeInterval {
 		return fmt.Errorf("--stale-after (%s) must be at least --scrape-interval (%s)", cfg.StaleAfter, *scrapeInterval)
+	}
+	if *webhookAddr != "" && (*smiImage == "" || *smiURL == "") {
+		return errors.New("--webhook-bind-address needs --smi-image and --smi-url")
 	}
 	loads, err := load.NewResolver(cfg)
 	if err != nil {
@@ -187,9 +198,24 @@ func run() error {
 		return err
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 15 * time.Second}
-	serveErr := make(chan error, 1)
+	servers := []*http.Server{server}
+	serveErr := make(chan error, 2)
 	go func() { serveErr <- server.Serve(listener) }()
 	slog.Info("serving", "addr", listener.Addr(), "node", *node, "load-source", cfg.Source)
+	if *webhookAddr != "" {
+		var resources []corev1.ResourceName
+		for r := range strings.SplitSeq(*smiResources, ",") {
+			resources = append(resources, corev1.ResourceName(strings.TrimSpace(r)))
+		}
+		injector := webhook.Injector{Image: *smiImage, URL: *smiURL, Resources: resources}
+		ws, wl, err := webhookServer(*webhookAddr, *webhookCertDir, injector)
+		if err != nil {
+			return err
+		}
+		servers = append(servers, ws)
+		go func() { serveErr <- ws.ServeTLS(wl, "", "") }()
+		slog.Info("serving webhook", "addr", wl.Addr())
+	}
 
 	select {
 	case err := <-serveErr:
@@ -198,7 +224,41 @@ func run() error {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return server.Shutdown(shutdown)
+	var errs []error
+	for _, s := range servers {
+		errs = append(errs, s.Shutdown(shutdown))
+	}
+	return errors.Join(errs...)
+}
+
+// webhookServer serves the injector over TLS with the key pair in dir, read
+// on every handshake so a renewed certificate needs no restart.
+func webhookServer(addr, dir string, injector webhook.Injector) (*http.Server, net.Listener, error) {
+	certFile, keyFile := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		return nil, nil, fmt.Errorf("webhook certificate: %w", err)
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	mux := http.NewServeMux()
+	mux.Handle("POST /inject", injector)
+	return &http.Server{Handler: mux, ReadHeaderTimeout: 15 * time.Second, TLSConfig: &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			c, err := tls.LoadX509KeyPair(certFile, keyFile)
+			return &c, err
+		},
+	}}, l, nil
+}
+
+func joinResources(rs []corev1.ResourceName) string {
+	s := make([]string, len(rs))
+	for i, r := range rs {
+		s[i] = string(r)
+	}
+	return strings.Join(s, ",")
 }
 
 // every runs f now, then on each tick until ctx ends.
