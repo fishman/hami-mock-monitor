@@ -1,0 +1,59 @@
+{
+  "node": "gpu-node-1",
+  "devices": [
+    {
+      "index": 0,
+      "uuid": "GPU-mock-0",
+      "type": "NVIDIA-A100-SXM4-40GB",
+      "memoryBytes": 42949672960,
+      "usedBytes": 31138198323.2,
+      "utilization": 64.8
+    },
+    {
+      "index": 1,
+      "uuid": "GPU-mock-1",
+      "type": "NVIDIA-A100-SXM4-40GB",
+      "memoryBytes": 42949672960,
+      "usedBytes": 0,
+      "utilization": 0
+    }
+  ],
+  "processes": [
+    {
+      "namespace": "team-a",
+      "pod": "llm-0",
+      "podUID": "0b6c1f4e-3f2a-4c55-9d7e-1a2b3c4d5e6f",
+      "container": "vllm",
+      "vdeviceIndex": 0,
+      "deviceUUID": "GPU-mock-0",
+      "deviceType": "NVIDIA-A100-SXM4-40GB",
+      "limitBytes": 14316208128,
+      "usedBytes": 12884587315.2,
+      "utilization": 19.8
+    },
+    {
+      "namespace": "team-b",
+      "pod": "train-7f9c",
+      "podUID": "7f9c2d1a-8b3e-4f6a-a1b2-c3d4e5f60718",
+      "container": "eval",
+      "vdeviceIndex": 0,
+      "deviceUUID": "GPU-mock-0",
+      "deviceType": "NVIDIA-A100-SXM4-40GB",
+      "limitBytes": 4294967296,
+      "usedBytes": 1073741824.0,
+      "utilization": 5.0
+    },
+    {
+      "namespace": "team-b",
+      "pod": "train-7f9c",
+      "podUID": "7f9c2d1a-8b3e-4f6a-a1b2-c3d4e5f60718",
+      "container": "trainer",
+      "vdeviceIndex": 0,
+      "deviceUUID": "GPU-mock-0",
+      "deviceType": "NVIDIA-A100-SXM4-40GB",
+      "limitBytes": 21474836480,
+      "usedBytes": 17179869184.0,
+      "utilization": 40.0
+    }
+  ]
+}

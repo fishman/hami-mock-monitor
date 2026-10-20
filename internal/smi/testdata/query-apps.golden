@@ -1,0 +1,4 @@
+pid, process_name, used_gpu_memory [MiB]
+2268734, team-a/llm-0/vllm, 12287 MiB
+1922006, team-b/train-7f9c/eval, 1024 MiB
+3317123, team-b/train-7f9c/trainer, 16384 MiB
