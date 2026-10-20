@@ -50,6 +50,13 @@ spec:
             {{- if .Values.completeBinds }}
             - --complete-binds
             {{- end }}
+            {{- if .Values.smi.inject.enabled }}
+            - --webhook-bind-address=:{{ .Values.smi.inject.port }}
+            - --webhook-cert-dir=/tls
+            - --smi-image={{ include "hami-mock-monitor.image" . }}
+            - --smi-url=http://{{ include "hami-mock-monitor.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+            - --smi-resources={{ join "," .Values.smi.inject.resourceNames }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -61,6 +68,14 @@ spec:
           ports:
             - name: metrics
               containerPort: 9394
+            {{- if .Values.smi.inject.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.smi.inject.port }}
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tls
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -78,6 +93,12 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.smi.inject.enabled }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "hami-mock-monitor.fullname" . }}-webhook-tls
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -1,0 +1,109 @@
+{{/* SPDX-FileCopyrightText: 2026 Reza Jelveh */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{/*
+The nvidia-smi injection webhook, served by every monitor pod. One file, so
+the generated CA reaches both the Secret and the caBundle.
+*/}}
+{{- if .Values.smi.inject.enabled }}
+{{- $fullname := include "hami-mock-monitor.fullname" . }}
+{{- $svc := printf "%s-webhook" $fullname }}
+{{- $secretName := printf "%s-webhook-tls" $fullname }}
+{{- $dnsNames := list $svc (printf "%s.%s" $svc .Release.Namespace) (printf "%s.%s.svc" $svc .Release.Namespace) (printf "%s.%s.svc.cluster.local" $svc .Release.Namespace) }}
+{{- $caBundle := "" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "hami-mock-monitor.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+---
+{{- if .Values.smi.inject.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $secretName }}
+  dnsNames:
+    {{- toYaml $dnsNames | nindent 4 }}
+  issuerRef:
+    kind: Issuer
+    name: {{ $svc }}
+{{- else }}
+{{- /* Keep the CA and certificate across upgrades; helm template finds none. */}}
+{{- $tls := (lookup "v1" "Secret" .Release.Namespace $secretName).data | default dict }}
+{{- if not (hasKey $tls "ca.crt") }}
+{{- $ca := genCA (printf "%s-ca" $fullname) 3650 }}
+{{- $cert := genSignedCert (printf "%s.%s.svc" $svc .Release.Namespace) nil $dnsNames 3650 $ca }}
+{{- $tls = dict "ca.crt" ($ca.Cert | b64enc) "tls.crt" ($cert.Cert | b64enc) "tls.key" ($cert.Key | b64enc) }}
+{{- end }}
+{{- $caBundle = index $tls "ca.crt" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ index $tls "ca.crt" }}
+  tls.crt: {{ index $tls "tls.crt" }}
+  tls.key: {{ index $tls "tls.key" }}
+{{- end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "hami-mock-monitor.labels" . | nindent 4 }}
+  {{- if .Values.smi.inject.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ $svc }}
+  {{- end }}
+webhooks:
+  - name: nvidia-smi.hami-mock-monitor.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $svc }}
+        namespace: {{ .Release.Namespace }}
+        path: /inject
+        port: 443
+      {{- with $caBundle }}
+      caBundle: {{ . }}
+      {{- end }}
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: Namespaced
+    namespaceSelector:
+      {{- toYaml .Values.smi.inject.namespaceSelector | nindent 6 }}
+{{- end }}

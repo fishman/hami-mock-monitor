@@ -1,6 +1,10 @@
 {{/* SPDX-FileCopyrightText: 2026 Reza Jelveh */}}
 {{/* SPDX-License-Identifier: Apache-2.0 */}}
-{{/* Scrape the endpoints (one per node), not the virtual IP. */}}
+{{/*
+Scrape the endpoints (one per node), not the virtual IP. internalTrafficPolicy
+Local sends the virtual IP to the monitor on the client's own node, which the
+mock nvidia-smi in injected containers relies on (GET /smi).
+*/}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,6 +13,7 @@ metadata:
   labels:
     {{- include "hami-mock-monitor.labels" . | nindent 4 }}
 spec:
+  internalTrafficPolicy: Local
   selector:
     {{- include "hami-mock-monitor.selectorLabels" . | nindent 4 }}
   ports:

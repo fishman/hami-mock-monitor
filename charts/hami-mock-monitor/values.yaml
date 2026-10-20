@@ -34,6 +34,32 @@ serviceMonitor:
   interval: 15s
   labels: {}
 
+smi:
+  inject:
+    # Put the mock nvidia-smi into the containers of pods HAMi allocates
+    # devices to, with a mutating webhook (failurePolicy Ignore) the monitor
+    # serves. Containers ask the monitor of their node through the Service.
+    enabled: false
+    # Namespaces whose new pods are considered.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [kube-system]
+    # A limit on one of these marks a new pod as HAMi-allocated (HAMi writes
+    # hami.io/vgpu-devices-allocated only when scheduling, after admission);
+    # pods created with that annotation count as well.
+    resourceNames:
+      - nvidia.com/gpu
+      - nvidia.com/gpumem
+      - nvidia.com/gpucores
+      - nvidia.com/gpumem-percentage
+    port: 9443
+    # Have cert-manager issue the webhook certificate instead of a CA the
+    # chart generates once and keeps across upgrades.
+    certManager:
+      enabled: false
+
 resources:
   requests:
     cpu: 10m

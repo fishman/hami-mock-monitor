@@ -22,7 +22,8 @@ registration) and fills in usage from a load source, so the series have the
 same names, labels and units as on a real node.
 
 It also works around a gap in the mock device plugin: its `Allocate` never
-completes HAMi's bind (see [Bind completion](#bind-completion)).
+completes HAMi's bind (see [Bind completion](#bind-completion)). And it brings
+a [mock nvidia-smi](#mock-nvidia-smi), for the node and inside the containers.
 
 ## HAMi compatibility
 
@@ -141,6 +142,108 @@ idempotent. It is a workaround until the mock device plugin does this itself;
 patch. It needs `patch` on pods and nodes, which the chart grants only when it
 is on.
 
+## Mock nvidia-smi
+
+`hami-mock-monitor smi` prints the node's mock GPUs the way `nvidia-smi`
+(driver 580) does, from the monitor's in-memory state: the snapshot the
+metrics are built from, served as JSON on `GET /smi` on the metrics port.
+
+```sh
+kubectl -n kube-system exec ds/hami-mock-monitor -- hami-mock-monitor smi
+hami-mock-monitor smi --node gpu-node-1   # from outside, through the API server
+```
+
+```
+Fri Oct 16 09:30:00 2026
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.105.08 MOCK        Driver Version: 580.105.08     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA-A100-SXM4-40GB          On  |   00000000:01:00.0 Off |                  N/A |
+| N/A   62C    P0            280W /  400W |   29695MiB /  40960MiB |     65%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA-A100-SXM4-40GB          On  |   00000000:02:00.0 Off |                  N/A |
+| N/A   30C    P8             60W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A         2268734      C   team-a/llm-0/vllm                     12287MiB | (13653MiB alloc)
+|    0   N/A  N/A         1922006      C   team-b/train-7f9c/eval                 1024MiB | (4096MiB alloc)
+|    0   N/A  N/A         3317123      C   team-b/train-7f9c/trainer             16384MiB | (20480MiB alloc)
++-----------------------------------------------------------------------------------------+
+```
+
+The header says `MOCK` and `uuid` is the UUID from HAMi's device
+registration, so the output is not mistaken for real hardware. Per GPU: the
+registered index and type, a Bus-Id derived from the index
+(`00000000:<index+1 hex>:00.0`), memory used as the sum of the containers'
+usage, GPU-Util from the load sources; temperature (30 C idle to 80 C) and
+power (60 W idle to the 400 W cap) follow utilization, perf is `P0` when busy
+and `P8` when idle. One process row per device of each allocated container:
+a stable fake PID (a hash of pod UID and container), type `C`,
+`<namespace>/<pod>/<container>`, its usage, and right of the row its
+allocation, so used and allocated are both visible. Values whose load is
+unknown show `N/A`.
+
+Both views also answer `--query-gpu=` with `index, name, uuid, pci.bus_id,
+memory.total, memory.used, memory.free, utilization.gpu, temperature.gpu,
+power.draw, power.limit` and `--query-compute-apps=pid,process_name,used_memory`,
+with `--format=csv[,noheader][,nounits]`. Unknown fields fail as in
+nvidia-smi (`Field "x" is not a valid field to query.`, exit 2); without a
+device the answer is `No devices were found` (exit 6), without a monitor
+exit 9.
+
+`--monitor-url` (default `http://localhost:9394`, the monitor in the same pod)
+names the monitor to ask. `--node` asks the monitor pod on that node
+(`app.kubernetes.io/name=hami-mock-monitor`) through the API server's pod
+proxy with the kubeconfig, which needs `list` on pods and `get` on
+`pods/proxy`.
+
+### Inside containers
+
+With `smi.inject.enabled=true` the chart registers a mutating webhook the
+monitor serves (`failurePolicy: Ignore`) for new pods in namespaces matching
+`smi.inject.namespaceSelector` (default: all but `kube-system`) that HAMi
+allocates to. HAMi writes `hami.io/vgpu-devices-allocated` only when it
+schedules a pod, after admission, so a pod qualifies by a limit on one of
+`smi.inject.resourceNames` (HAMi's NVIDIA resources) or by carrying the
+annotation already. Other pods are left untouched. The webhook adds:
+
+- an init container from the monitor image that copies the binary into an
+  emptyDir (`hami-mock-monitor install-smi`; the image has no shell),
+- the binary as the single file `/usr/local/bin/nvidia-smi` (subPath) in
+  every container,
+- `HAMI_MOCK_SMI_URL` (the chart's Service, `internalTrafficPolicy: Local`,
+  so a container reaches the monitor of its own node), `POD_NAMESPACE` and
+  `POD_NAME` (downward API) and `HAMI_MOCK_SMI_CONTAINER`. Variables the
+  container sets itself win.
+
+Called as `nvidia-smi`, the binary asks for `GET /smi?namespace=&pod=&container=`
+and shows the container's slice as HAMi's libvgpu does: one GPU per allocated
+vGPU numbered from 0, its memory limit as total, its own usage and
+utilization share, itself as the only process.
+
+```sh
+kubectl exec sim -- nvidia-smi
+kubectl exec sim -- nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+```
+
+The webhook certificate comes from a CA the chart generates on install and
+keeps across upgrades (`lookup`, so `helm template` renders a new one), or
+from cert-manager with `smi.inject.certManager.enabled=true` (a self-signed
+Issuer, CA injection into the webhook configuration). The monitor reads it on
+every handshake, so renewals need no restart. The init container pulls the
+monitor image with the pod's own pull secrets.
+
 ## Install
 
 ```sh
@@ -149,11 +252,12 @@ helm install hami-mock-monitor charts/hami-mock-monitor -n kube-system
 
 The chart runs a DaemonSet (with `NODE_NAME` from the downward API), its
 ServiceAccount and ClusterRole (pods `list`/`watch`, nodes `get`/`list`/`watch`;
-plus pods and nodes `patch` with `completeBinds`), a Service on 9394 and, with
-`serviceMonitor.enabled`, a ServiceMonitor. No `nodeSelector` by default; set
-one to run only on the mocked GPU nodes. Scrape the endpoints (one per node),
-not the Service's virtual IP. Further flags go in `extraArgs`; see
-`hami-mock-monitor --help`.
+plus pods and nodes `patch` with `completeBinds`), a Service on 9394 with
+`internalTrafficPolicy: Local` and, with `serviceMonitor.enabled`, a
+ServiceMonitor; with `smi.inject.enabled` also the webhook, its Service and
+certificate. No `nodeSelector` by default; set one to run only on the mocked
+GPU nodes. Scrape the endpoints (one per node), not the Service's virtual IP.
+Further flags go in `extraArgs`; see `hami-mock-monitor --help`.
 
 ## Quickstart: kind, HAMi, mock device plugin, llm-d-inference-sim
 
@@ -180,7 +284,8 @@ make image IMG=hami-mock-monitor:dev
 kind load docker-image hami-mock-monitor:dev --name hami-mock
 helm install hami-mock-monitor charts/hami-mock-monitor -n kube-system \
   --set image.repository=hami-mock-monitor --set image.tag=dev \
-  --set completeBinds=true
+  --set completeBinds=true --set smi.inject.enabled=true
+kubectl -n kube-system rollout status ds/hami-mock-monitor
 ```
 
 An inference simulator on a third of a card, its load oscillating over two
@@ -216,6 +321,7 @@ EOF
 kubectl get pod sim -o jsonpath='{.metadata.annotations.hami\.io/bind-phase}{"\n"}'  # success
 kubectl -n kube-system port-forward ds/hami-mock-monitor 9394 &
 curl -s localhost:9394/metrics | grep '^hami_'
+kubectl exec sim -- nvidia-smi
 ```
 
 ## Upstream patch

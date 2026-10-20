@@ -22,8 +22,9 @@ lint:
 image:
 	docker build -t $(IMG) .
 
-# Renders the chart with bind completion off and on.
+# Renders the chart with bind completion and nvidia-smi injection off and on.
 chart-test:
 	$(HELM) lint $(CHART)
 	$(HELM) template test $(CHART) >/dev/null
-	$(HELM) template test $(CHART) --set completeBinds=true --set serviceMonitor.enabled=true >/dev/null
+	$(HELM) template test $(CHART) --set completeBinds=true --set serviceMonitor.enabled=true --set smi.inject.enabled=true >/dev/null
+	$(HELM) template test $(CHART) --set smi.inject.enabled=true --set smi.inject.certManager.enabled=true >/dev/null
